@@ -2877,7 +2877,7 @@ function selectAnalysisSession(id) {{
 }}
 
 function selectCableView() {{
-  const plotSel = document.getElementById('cable-plot-select);
+  const plotSel = document.getElementById('cable-plot-select');
   const ampSel = document.getElementById('cable-amp-select');
   if (!plotSel || !ampSel) return;
   const plotType = plotSel.value || 'warmest';
