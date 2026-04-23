@@ -190,7 +190,7 @@ Oder bequem per **Doppelklick** auf eine der `*.bat`-Dateien.
 ## HTML-Report erzeugen
 
 ```powershell
-# Default: letzte 24h, alle Tabs, Browser öffnet automatisch
+# Default: alle Daten, alle Tabs, Browser öffnet automatisch
 .\.venv\Scripts\python.exe nrgkick_stats.py
 
 # Sieben Tage, Default-Tab "Aktuelle Session"

@@ -52,7 +52,7 @@
 
   "report": {
     "_help": "Default-Verhalten des Stats-Tools. Commandline-Flags uebersteuern.",
-    "default_range": "24h",
+    "default_range": "all",
     "default_tab": "dashboard",
     "auto_open": true,
     "report_filename": "latest.html",

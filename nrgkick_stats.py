@@ -44,6 +44,7 @@ from nrgkick_config import (
 # Wird in main() mit der konkreten Config gefuellt, damit Hilfsfunktionen
 # weiterhin Zugriff haben, ohne die Signatur ueberall aendern zu muessen.
 CFG: dict = {}
+REPORT_RANGE_NAME = "24h"
 
 
 def _cfg_get(path: str, default=None):
@@ -159,6 +160,7 @@ def _col(df: pd.DataFrame, col: str) -> list | None:
 # Gemeinsames Layout-Fragment fuer Zeitreihen -------------------------------
 
 def _timeseries_layout(title: str, yaxis_title: str, height: int = 420) -> dict:
+    last_button_label = "Alles" if REPORT_RANGE_NAME == "all" else "Zeitraum"
     return {
         "title": title,
         "height": height,
@@ -174,7 +176,7 @@ def _timeseries_layout(title: str, yaxis_title: str, height: int = 420) -> dict:
                     {"count": 24, "step": "hour", "stepmode": "backward", "label": "24h"},
                     {"count": 7,  "step": "day",  "stepmode": "backward", "label": "7T"},
                     {"count": 30, "step": "day",  "stepmode": "backward", "label": "30T"},
-                    {"step": "all", "label": "Alles"},
+                    {"step": "all", "label": last_button_label},
                 ]
             },
             "type": "date",
@@ -3253,9 +3255,10 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     if heatmap_fig: plots["plot-dash-heatmap"] = heatmap_fig
 
     # --- Panels ---------------------------------------------------------
-    hint_zoom = ('<p class="hint">Tipp: Bereich mit der Maus aufziehen '
-                 '= hineinzoomen &middot; Doppelklick = Reset &middot; '
-                 'Shortcuts 1h/6h/24h/7T/30T/Alles oben links im Plot.</p>')
+    last_button_hint = "Alles" if REPORT_RANGE_NAME == "all" else "Zeitraum"
+    hint_zoom = (f'<p class="hint">Tipp: Bereich mit der Maus aufziehen '
+                 f'= hineinzoomen &middot; Doppelklick = Reset &middot; '
+                 f'Shortcuts 1h/6h/24h/7T/30T/{last_button_hint} oben links im Plot.</p>')
     hint_legend = ('<p class="hint">Klick auf Legenden-Eintraege blendet '
                    'einzelne Kurven aus/ein.</p>')
 
@@ -3423,10 +3426,16 @@ def render_html(title: str, df: pd.DataFrame, tabs_html: str, sections_html: str
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    global CFG, DATA_DIR, DB_FILE, REPORT_DIR
+    global CFG, DATA_DIR, DB_FILE, REPORT_DIR, REPORT_RANGE_NAME
+
+    argv = argv if argv is not None else sys.argv[1:]
+
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config")
+    pre_args, _ = pre_parser.parse_known_args(argv)
 
     # Defaults aus Config auflesen, sodass argparse sie als --help zeigen kann
-    _preview_cfg = _load_cfg()
+    _preview_cfg = _load_cfg(pre_args.config) if pre_args.config else _load_cfg()
     report_cfg = _preview_cfg.get("report", {}) or {}
     default_range = report_cfg.get("default_range", "24h")
     default_tab   = report_cfg.get("default_tab",   "dashboard")
@@ -3460,6 +3469,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config", help="alternativer Pfad zur config.json",
     )
     args = parser.parse_args(argv)
+    REPORT_RANGE_NAME = args.range
 
     # Ggf. andere Config laden (falls --config uebergeben)
     CFG = _load_cfg(args.config) if args.config else _preview_cfg

@@ -11,8 +11,8 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt || goto :error
 )
 
-echo [start] Erzeuge HTML-Report...
-".venv\Scripts\python.exe" "%~dp0nrgkick_stats.py"
+echo [start] Erzeuge HTML-Report fuer alle Daten...
+".venv\Scripts\python.exe" "%~dp0nrgkick_stats.py" --range all
 if errorlevel 1 goto :error
 
 echo.

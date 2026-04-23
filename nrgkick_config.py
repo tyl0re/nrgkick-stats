@@ -72,7 +72,7 @@ DEFAULTS: dict[str, Any] = {
         "recovery_cooldown_c":   3.0,    # °C unter Derating-Peak = Recovery
     },
     "report": {
-        "default_range":   "24h",        # today | 24h | 7d | 30d | all
+        "default_range":   "all",        # today | 24h | 7d | 30d | all
         "default_tab":     "dashboard",
         "auto_open":       True,
         "report_filename": "latest.html",  # feste Datei + zusaetzlich Zeitstempel
