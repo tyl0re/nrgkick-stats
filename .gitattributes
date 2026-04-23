@@ -1,0 +1,13 @@
+# Binaerdateien: keine Zeilenend-Konvertierung
+*.png binary
+*.jpg binary
+*.ico binary
+*.db  binary
+*.zip binary
+
+# Text-Dateien: LF in Git, OS-Default im Working Tree
+*.py   text
+*.md   text
+*.json text
+*.bat  text eol=crlf
+*.ps1  text eol=crlf

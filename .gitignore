@@ -1,0 +1,35 @@
+# virtualenv
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Projektspezifisch
+tools/nssm.exe
+tools/nssm*.zip
+reports/
+*.db
+*.db-*
+*.log
+*.log.*
+config.json
+config.local.json
+
+# lokale Dev-Tools und Helfer (nicht ins Repo).
+# Alles was mit Unterstrich beginnt, plus der gesamte _dev-Ordner.
+_dev/
+_*.py
+_*.bat
+requirements-dev.txt

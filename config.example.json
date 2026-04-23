@@ -1,0 +1,83 @@
+{
+  "_help": "Kommentierte Beispielkonfiguration. NUR Werte kopieren die man aendern will - fehlende greifen automatisch auf die Defaults zurueck.",
+
+  "connection": {
+    "_help": "Verbindungsdaten zur NRGkick. Die IP findest du in der NRGkick-App unter Einstellungen -> WLAN. Aktiviere in der App: Einstellungen -> Lokale API -> JSON API (ggf. Passwort setzen).",
+    "host": "192.168.1.100",
+    "username": "",
+    "password": "",
+    "use_https": false,
+    "verify_tls": true,
+    "http_timeout": 10
+  },
+
+  "polling": {
+    "_help": "Wie oft wird die Wallbox abgefragt. 360s (6 min) = guter Kompromiss aus Aufloesung und Ressourcen. jitter_seconds verschiebt den Takt zufaellig falls mehrere Instanzen dasselbe Geraet abfragen.",
+    "interval_seconds": 360,
+    "jitter_seconds": 0,
+    "info_refresh_minutes": 60,
+    "poll_on_start": true
+  },
+
+  "data": {
+    "_help": "Wohin Daten geschrieben werden. data_dir unterstuetzt ${LOCALAPPDATA}, ${HOME}, ${APPNAME}. store_kv=true legt jedes API-Feld als Key-Value-Zeile ab (flexibel auswertbar).",
+    "data_dir": "${LOCALAPPDATA}/${APPNAME}",
+    "db_filename": "nrgkick.db",
+    "log_filename": "nrgkick.log",
+    "reports_dir": "reports",
+    "store_raw_json": true,
+    "store_kv": true,
+    "keep_kv_days": 0,
+    "log_max_bytes": 2000000,
+    "log_backup_count": 5
+  },
+
+  "thresholds": {
+    "_help": "Schwellenwerte fuer Temperatur-Ampel und Session-Erkennung. standby_power_w: unter diesem Wert zaehlt die Wallbox als nicht-ladend. session_gap_minutes: groessere Messluecke = neue Session.",
+    "temperature_cool": 40.0,
+    "temperature_warm": 60.0,
+    "temperature_hot": 75.0,
+    "temperature_critical": 90.0,
+    "standby_power_w": 50.0,
+    "session_gap_minutes": 15.0
+  },
+
+  "derating": {
+    "_help": "Parameter fuer die automatische Derating-Erkennung (thermische Drosselung). min_delta_a: kleinere Strom-Aenderungen werden ignoriert. temp_quantile: Schwelle ist das x-Quantil der Session-Temperaturen (0.75 = oberes Viertel).",
+    "min_delta_a": 1.0,
+    "window_minutes": 2.0,
+    "temp_quantile": 0.75,
+    "recovery_cooldown_c": 3.0
+  },
+
+  "report": {
+    "_help": "Default-Verhalten des Stats-Tools. Commandline-Flags uebersteuern.",
+    "default_range": "24h",
+    "default_tab": "dashboard",
+    "auto_open": true,
+    "report_filename": "latest.html",
+    "keep_history": true
+  },
+
+  "ui": {
+    "_help": "Darstellungs-Optionen. heatmap_colorscale: Liste von [position, hexcolor]-Paaren (0.0 - 1.0).",
+    "locale": "de",
+    "timezone": null,
+    "heatmap_colorscale": [
+      [0.00, "#2c3e8f"],
+      [0.25, "#3b9cff"],
+      [0.50, "#2ca02c"],
+      [0.75, "#ff7f0e"],
+      [1.00, "#d62728"]
+    ]
+  },
+
+  "service": {
+    "_help": "Windows-Dienst-Einstellungen (nur fuer service.ps1 relevant). service_name muss eindeutig sein falls mehrere NRGkicks parallel betrieben werden.",
+    "service_name": "NRGkickLogger",
+    "display_name": "NRGkick Logger",
+    "description": "Zeichnet NRGkick-Daten periodisch in eine SQLite-DB auf.",
+    "nssm_path": "",
+    "nssm_download": "https://nssm.cc/release/nssm-2.24.zip"
+  }
+}
