@@ -1330,10 +1330,24 @@ def fig_analysis_stacked(sess: pd.DataFrame, events: pd.DataFrame) -> dict | Non
     return {"data": traces, "layout": layout}
 
 
-def fig_analysis_scatter_p_vs_t(sess: pd.DataFrame) -> dict | None:
+def _filter_analysis_by_amp(sess: pd.DataFrame, amp: int | None) -> pd.DataFrame:
+    if sess.empty or amp is None:
+        return sess
+    d = sess.copy()
+    if "set_current_a" in d.columns and d["set_current_a"].notna().any():
+        i_bin = pd.to_numeric(d["set_current_a"], errors="coerce").round()
+    else:
+        phase_cols = [c for c in ["current_l1_a", "current_l2_a", "current_l3_a"] if c in d.columns]
+        if not phase_cols:
+            return d.iloc[0:0].copy()
+        i_bin = d[phase_cols].max(axis=1).round()
+    return d[i_bin == int(amp)].copy()
+
+
+def fig_analysis_scatter_p_vs_t(sess: pd.DataFrame, amp: int | None = None) -> dict | None:
     if sess.empty or "power_w" not in sess.columns:
         return None
-    charging = sess[sess["charging_state"] == "CHARGING"]
+    charging = _filter_analysis_by_amp(sess[sess["charging_state"] == "CHARGING"].copy(), amp)
     if charging.empty:
         return None
     # Waermste Stelle: Typ2, Schuko, Gehaeuse - was immer am heissesten ist,
@@ -1365,10 +1379,51 @@ def fig_analysis_scatter_p_vs_t(sess: pd.DataFrame) -> dict | None:
         "name": "Sample",
     }
     layout = {
-        "title": "Leistung vs. waermster Sensor (nur CHARGING-Samples)",
+        "title": ("Leistung vs. waermster Sensor"
+                  + (f" ({amp} A)" if amp is not None else " (nur CHARGING-Samples)")),
         "height": 380,
         "margin": {"l": 60, "r": 20, "t": 50, "b": 60},
         "xaxis": {"title": "Temperatur des waermsten Sensors (°C)"},
+        "yaxis": {"title": "Leistung (W)"},
+        "template": "plotly_white",
+    }
+    return {"data": [trace], "layout": layout}
+
+
+def fig_analysis_socket_scatter_p_vs_t(sess: pd.DataFrame, amp: int | None = None) -> dict | None:
+    if sess.empty or "power_w" not in sess.columns:
+        return None
+    charging = _filter_analysis_by_amp(sess[sess["charging_state"] == "CHARGING"].copy(), amp)
+    if charging.empty:
+        return None
+    socket_cols = [c for c in ["temp_domestic_plug", "temp_domestic_plug_1", "temp_domestic_plug_2"]
+                   if c in charging.columns and charging[c].notna().any()]
+    if not socket_cols:
+        return None
+    t_socket = charging[socket_cols].max(axis=1)
+    p = charging["power_w"]
+    mask = t_socket.notna() & p.notna()
+    if mask.sum() < 5:
+        return None
+    trace = {
+        "type": "scattergl", "mode": "markers",
+        "x": [float(v) for v in t_socket[mask].tolist()],
+        "y": [float(v) for v in p[mask].tolist()],
+        "marker": {
+            "size": 6, "opacity": 0.6,
+            "color": [(t - t_socket.min()) / max(1.0, (t_socket.max() - t_socket.min())) for t in t_socket[mask].tolist()],
+            "colorscale": "Turbo",
+            "showscale": False,
+        },
+        "hovertemplate": "Steckdose: %{x:.1f} °C<br>Leistung: %{y:.0f} W<extra></extra>",
+        "name": "Sample",
+    }
+    layout = {
+        "title": ("Leistung vs. Steckdose / Schuko"
+                  + (f" ({amp} A)" if amp is not None else "")),
+        "height": 380,
+        "margin": {"l": 60, "r": 20, "t": 50, "b": 60},
+        "xaxis": {"title": "Temperatur Steckdose / Schuko (°C)"},
         "yaxis": {"title": "Leistung (W)"},
         "template": "plotly_white",
     }
@@ -1521,7 +1576,9 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         fig_stack   = fig_analysis_stacked(sub, events)
         fig_prog    = fig_analysis_progress(sub)
         fig_scatter = fig_analysis_scatter_p_vs_t(sub)
+        fig_socket  = fig_analysis_socket_scatter_p_vs_t(sub)
         fig_hist    = fig_analysis_power_histogram(sub)
+        amp_bins = sorted(int(v) for v in pd.to_numeric(sub.get("set_current_a"), errors="coerce").dropna().round().astype(int).unique().tolist()) if "set_current_a" in sub.columns and sub["set_current_a"].notna().any() else []
 
         plot_blocks: list[str] = []
         if fig_stack:
@@ -1532,10 +1589,42 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             pid = f"plot-{sid}-progress"
             plots_out[pid] = fig_prog
             plot_blocks.append(_plot_div(pid))
+        scatter_views: list[str] = []
         if fig_scatter:
             pid = f"plot-{sid}-scatter"
             plots_out[pid] = fig_scatter
-            plot_blocks.append(_plot_div(pid))
+            scatter_views.append(f'<div class="analysis-scatter-view" id="{sid}-scatter-warmest-all">' + _plot_div(pid) + '</div>')
+        if fig_socket:
+            pid = f"plot-{sid}-socket"
+            plots_out[pid] = fig_socket
+            scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-socket-all">' + _plot_div(pid) + '</div>')
+        for amp in amp_bins:
+            fig_scatter_amp = fig_analysis_scatter_p_vs_t(sub, amp)
+            fig_socket_amp = fig_analysis_socket_scatter_p_vs_t(sub, amp)
+            if fig_scatter_amp:
+                pid = f"plot-{sid}-scatter-{amp}a"
+                plots_out[pid] = fig_scatter_amp
+                scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-warmest-{amp}a">' + _plot_div(pid) + '</div>')
+            if fig_socket_amp:
+                pid = f"plot-{sid}-socket-{amp}a"
+                plots_out[pid] = fig_socket_amp
+                scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-socket-{amp}a">' + _plot_div(pid) + '</div>')
+        if scatter_views:
+            scatter_select = (
+                '<div class="session-selector">'
+                f'<label for="{sid}-scatter-type">Grafik: </label>'
+                f'<select id="{sid}-scatter-type" onchange="selectAnalysisScatter(\'{sid}\')">'
+                '<option value="warmest" selected>waermster Sensor</option>'
+                '<option value="socket">Steckdose / Schuko</option>'
+                '</select>'
+                f'<label for="{sid}-scatter-amp">Strom: </label>'
+                f'<select id="{sid}-scatter-amp" onchange="selectAnalysisScatter(\'{sid}\')">'
+                '<option value="all" selected>alle Punkte</option>'
+                + ''.join(f'<option value="{amp}a">{amp} A</option>' for amp in amp_bins)
+                + '</select>'
+                '</div>'
+            )
+            plot_blocks.append(scatter_select + ''.join(scatter_views))
         if fig_hist:
             pid = f"plot-{sid}-hist"
             plots_out[pid] = fig_hist
@@ -2733,6 +2822,7 @@ HTML_TEMPLATE = """<!doctype html>
   }}
   .analysis-session {{ margin: 1rem 0; }}
   .analysis-session.hidden {{ display: none; }}
+  .analysis-scatter-view.hidden {{ display: none; }}
   .cable-view.hidden {{ display: none; }}
 
   .limit-card {{
@@ -2868,6 +2958,28 @@ function selectAnalysisSession(id) {{
   }});
   // Plots in dieser Session rendern / resizen
   const sec = document.getElementById(id);
+  if (sec) {{
+    sec.querySelectorAll('.plot').forEach(el => {{
+      renderPlot(el.id);
+      requestAnimationFrame(() => Plotly.Plots.resize(el));
+    }});
+  }}
+  selectAnalysisScatter(id);
+}}
+
+function selectAnalysisScatter(id) {{
+  const typeSel = document.getElementById(id + '-scatter-type');
+  const ampSel = document.getElementById(id + '-scatter-amp');
+  if (!typeSel || !ampSel) return;
+  const plotType = typeSel.value || 'warmest';
+  const amp = ampSel.value || 'all';
+  const targetId = id + '-scatter-' + plotType + '-' + amp;
+
+  document.querySelectorAll('#' + id + ' .analysis-scatter-view').forEach(el => {{
+    el.classList.toggle('hidden', el.id !== targetId);
+  }});
+
+  const sec = document.getElementById(targetId);
   if (sec) {{
     sec.querySelectorAll('.plot').forEach(el => {{
       renderPlot(el.id);
