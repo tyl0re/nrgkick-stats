@@ -2031,6 +2031,109 @@ def _info_table(title: str, rows: list[tuple[str, str]]) -> str:
             f'</div>')
 
 
+def _nested_get(node: dict, *path: str):
+    cur = node
+    for part in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+def _first_present(node: dict, paths: list[tuple[str, ...]]):
+    for path in paths:
+        val = _nested_get(node, *path)
+        if val not in (None, ""):
+            return val
+    return None
+
+
+def _gps_info(raw: dict) -> dict:
+    lat = _first_present(raw, [
+        ("gps", "latitude"),
+        ("gps", "lat"),
+        ("location", "latitude"),
+        ("location", "lat"),
+        ("network", "gps", "latitude"),
+        ("network", "gps", "lat"),
+    ])
+    lon = _first_present(raw, [
+        ("gps", "longitude"),
+        ("gps", "lon"),
+        ("gps", "lng"),
+        ("location", "longitude"),
+        ("location", "lon"),
+        ("location", "lng"),
+        ("network", "gps", "longitude"),
+        ("network", "gps", "lon"),
+        ("network", "gps", "lng"),
+    ])
+    if lat is None or lon is None:
+        return {}
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except Exception:
+        return {}
+    return {
+        "lat": lat_f,
+        "lon": lon_f,
+        "fix": _first_present(raw, [
+            ("gps", "fix"),
+            ("gps", "fix_type"),
+            ("location", "fix"),
+            ("network", "gps", "fix"),
+        ]),
+        "accuracy": _first_present(raw, [
+            ("gps", "accuracy"),
+            ("gps", "accuracy_m"),
+            ("location", "accuracy"),
+            ("location", "accuracy_m"),
+        ]),
+    }
+
+
+def _cellular_info(raw: dict) -> dict:
+    return {
+        "operator": _first_present(raw, [
+            ("cellular", "operator"),
+            ("cellular", "provider"),
+            ("mobile", "operator"),
+            ("modem", "operator"),
+            ("network", "cellular", "operator"),
+        ]),
+        "technology": _first_present(raw, [
+            ("cellular", "technology"),
+            ("cellular", "network_type"),
+            ("mobile", "technology"),
+            ("modem", "technology"),
+            ("network", "cellular", "technology"),
+        ]),
+        "signal": _first_present(raw, [
+            ("cellular", "signal"),
+            ("cellular", "rssi"),
+            ("mobile", "signal"),
+            ("modem", "rssi"),
+            ("network", "cellular", "signal"),
+            ("network", "cellular", "rssi"),
+        ]),
+        "imei": _first_present(raw, [
+            ("cellular", "imei"),
+            ("mobile", "imei"),
+            ("modem", "imei"),
+            ("network", "cellular", "imei"),
+        ]),
+        "iccid": _first_present(raw, [
+            ("cellular", "iccid"),
+            ("mobile", "iccid"),
+            ("modem", "iccid"),
+            ("network", "cellular", "iccid"),
+        ]),
+    }
+
+
 def _code_table_html(kind: str, rows: list[tuple[str, str, str]]) -> str:
     sev_class_map = {"ok": "sev-ok", "warn": "sev-warn", "error": "sev-error"}
     tr_rows = []
@@ -2060,6 +2163,8 @@ def build_info_panel() -> str:
         grid = raw.get("grid", {})
         net = raw.get("network", {})
         ver = raw.get("versions", {})
+        gps = _gps_info(raw)
+        cellular = _cellular_info(raw)
 
         cards.append(_info_table("Geraet", [
             ("Name",          dev.get("device_name") or gen.get("device_name")),
@@ -2102,6 +2207,34 @@ def build_info_panel() -> str:
             ("WLAN-SSID",     net.get("ssid")),
             ("WLAN-Signal",   rssi_text),
         ]))
+
+        cell_signal = cellular.get("signal")
+        if cell_signal not in (None, ""):
+            try:
+                cell_signal = f"{float(cell_signal):.0f} dBm"
+            except Exception:
+                cell_signal = str(cell_signal)
+        cards.append(_info_table("Mobilfunk", [
+            ("Netz",          cellular.get("technology")),
+            ("Anbieter",      cellular.get("operator")),
+            ("Signal",        cell_signal),
+            ("IMEI",          cellular.get("imei")),
+            ("ICCID",         cellular.get("iccid")),
+        ]))
+
+        gps_rows: list[tuple[str, str]] = []
+        if gps:
+            gps_rows.append(("Koordinaten", f'{gps["lat"]:.6f}, {gps["lon"]:.6f}'))
+            maps_url = f'https://www.openstreetmap.org/?mlat={gps["lat"]:.6f}&mlon={gps["lon"]:.6f}#map=16/{gps["lat"]:.6f}/{gps["lon"]:.6f}'
+            gps_rows.append(("Karte", f'<a href="{maps_url}" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'))
+            if gps.get("fix") not in (None, ""):
+                gps_rows.append(("Fix", str(gps["fix"])))
+            if gps.get("accuracy") not in (None, ""):
+                try:
+                    gps_rows.append(("Genauigkeit", f'{float(gps["accuracy"]):.1f} m'))
+                except Exception:
+                    gps_rows.append(("Genauigkeit", str(gps["accuracy"])))
+        cards.append(_info_table("GPS", gps_rows))
 
         # Firmware-Versionen (alle Microcontroller einzeln)
         # NRGkick Gen2 hat: sm, ma, to, st - jeweils sw+hw
