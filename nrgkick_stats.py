@@ -2225,6 +2225,102 @@ def fig_cable_scatter(cable: pd.DataFrame) -> dict | None:
     return {"data": traces, "layout": layout}
 
 
+def fig_cable_socket_scatter(cable: pd.DataFrame) -> dict | None:
+    """Strom (x) vs. Steckdosen-/Schuko-Temperatur (y)."""
+    if cable.empty or len(cable) < 5:
+        return None
+
+    socket_cols = [c for c in ["temp_domestic_plug", "temp_domestic_plug_1", "temp_domestic_plug_2"]
+                   if c in cable.columns and cable[c].notna().any()]
+    if not socket_cols:
+        return None
+
+    d = cable.copy()
+    d["t_socket"] = d[socket_cols].max(axis=1)
+    d = d.dropna(subset=["i_max", "t_socket"])
+    if len(d) < 5:
+        return None
+
+    ts_num = d.index.astype("int64").astype(float)
+    t_min, t_max = ts_num.min(), ts_num.max()
+    color = ((ts_num - t_min) / max(t_max - t_min, 1.0)).tolist() if t_max > t_min else [0.0] * len(d)
+
+    x = d["i_max"].astype(float).values
+    y = d["t_socket"].astype(float).values
+    if len(x) >= 2 and x.std() > 0:
+        m = float(((x - x.mean()) * (y - y.mean())).sum() / ((x - x.mean()) ** 2).sum())
+        b = float(y.mean() - m * x.mean())
+        x_line = [float(x.min()), float(x.max())]
+        y_line = [m * xv + b for xv in x_line]
+        try:
+            r = float(pd.Series(x).corr(pd.Series(y)))
+        except Exception:
+            r = float("nan")
+    else:
+        m, b, x_line, y_line, r = 0.0, 0.0, [], [], float("nan")
+
+    hover_texts = [
+        f"{ts.strftime('%d.%m. %H:%M')}<br>I = {ix:.2f} A<br>T Steckdose = {it:.1f} °C"
+        for ts, ix, it in zip(d.index, x, y)
+    ]
+
+    traces = [{
+        "type": "scattergl", "mode": "markers",
+        "x": [float(v) for v in x.tolist()],
+        "y": [float(v) for v in y.tolist()],
+        "marker": {
+            "size": 8, "opacity": 0.75,
+            "color": color,
+            "colorscale": "Plasma",
+            "showscale": True,
+            "colorbar": {
+                "title": "Zeit",
+                "tickmode": "array",
+                "tickvals": [0.0, 1.0],
+                "ticktext": [d.index[0].strftime("%d.%m. %H:%M"),
+                             d.index[-1].strftime("%d.%m. %H:%M")],
+                "x": 1.02,
+            },
+        },
+        "hovertext": hover_texts,
+        "hoverinfo": "text",
+        "name": "Messpunkt",
+    }]
+
+    annotations = []
+    if x_line:
+        traces.append({
+            "type": "scatter", "mode": "lines",
+            "x": x_line, "y": y_line,
+            "line": {"color": "#d62728", "width": 2, "dash": "dash"},
+            "name": f"Trend: +{m:.2f} °C/A",
+            "hoverinfo": "skip",
+        })
+        annotations.append({
+            "xref": "paper", "yref": "paper",
+            "x": 0.02, "y": 0.98, "xanchor": "left", "yanchor": "top",
+            "text": (f"<b>Trend Steckdose:</b> pro +1 A Strom ≈ +{m:.2f} °C<br>"
+                     f"<b>Korrelation r:</b> {r:+.2f}"),
+            "showarrow": False,
+            "bgcolor": "rgba(255,255,255,0.85)",
+            "bordercolor": "rgba(0,0,0,0.2)",
+            "borderwidth": 1, "borderpad": 6,
+            "font": {"size": 12},
+        })
+
+    layout = {
+        "title": "Strom vs. Steckdose / Schuko-Adapter",
+        "height": 480,
+        "margin": {"l": 60, "r": 120, "t": 55, "b": 60},
+        "xaxis": {"title": "Ist-Strom I (A)"},
+        "yaxis": {"title": "Temperatur (°C) - Steckdose / Schuko"},
+        "template": "plotly_white",
+        "annotations": annotations,
+        "legend": {"orientation": "h", "y": -0.15},
+    }
+    return {"data": traces, "layout": layout}
+
+
 def fig_cable_boxplot(cable: pd.DataFrame) -> dict | None:
     """Boxplot: Temperatur-Verteilung je Strom-Bin (ganzzahlige Ampere).
     Zeigt direkt 'bei X A werden typischerweise Y-Z Grad erreicht'."""
@@ -2374,9 +2470,11 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
     adapter_max_a = _get_adapter_max_a()
     fig_scatter = fig_cable_scatter(cable)
+    fig_socket  = fig_cable_socket_scatter(cable)
     fig_box     = fig_cable_boxplot(cable)
 
     if fig_scatter: plots_out["plot-cable-scatter"] = fig_scatter
+    if fig_socket:  plots_out["plot-cable-socket"]  = fig_socket
     if fig_box:     plots_out["plot-cable-box"]     = fig_box
 
     rec = _cable_recommendation(cable, adapter_max_a)
@@ -2398,6 +2496,7 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
         + '<div class="info-card"><h3>Empfehlung</h3>'
         + rec + '</div>'
         + (_plot_div("plot-cable-scatter") if "plot-cable-scatter" in plots_out else "")
+        + (_plot_div("plot-cable-socket")  if "plot-cable-socket"  in plots_out else "")
         + (_plot_div("plot-cable-box")     if "plot-cable-box"     in plots_out else "")
         + '</section>'
     )
