@@ -326,7 +326,7 @@ def fig_power_current(df: pd.DataFrame) -> dict | None:
         "mode": "lines",
         "x": x, "y": _col(df, "power_w"),
         "name": "Leistung (W)",
-        "line": {"color": "#1f77b4", "width": 1.5},
+        "line": {"color": "#9467bd", "width": 1.5},
         "hovertemplate": "%{y:.0f} W<extra>Leistung</extra>",
         "yaxis": "y1",
     }]
