@@ -80,7 +80,8 @@ auch als einfacher Loop. Ressourcenverbrauch ist minimal (wenige MB RAM,
   aus `config.json`, Deep-Merge, Pfad-Templates).
 - **`service.ps1`** — Control-Script für den Windows-Dienst (NSSM-basiert).
 - **`install_service.bat`, `uninstall_service.bat`, `service_restart.bat`,
-  `service_status.bat`** — Doppelklick-Wrapper mit UAC-Hochstufung.
+  `service_status.bat`, `stats.bat`** — Doppelklick-Wrapper; `stats.bat`
+  erzeugt direkt den HTML-Report.
 
 ## Voraussetzungen
 
@@ -201,6 +202,10 @@ Oder bequem per **Doppelklick** auf eine der `*.bat`-Dateien.
 
 Reports landen in `%LOCALAPPDATA%\NRGkickLogger\reports\` als einzelne
 HTML-Dateien (mit Zeitstempel) plus stets eine `latest.html`.
+
+Per Doppelklick auf `stats.bat` wird der Default-Report ebenfalls erzeugt;
+die Batch-Datei legt bei Bedarf auch automatisch die `.venv` an und
+installiert die Abhaengigkeiten.
 
 ### Tabs im Report
 
