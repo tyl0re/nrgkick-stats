@@ -2134,9 +2134,18 @@ def _prepare_cable_df(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def fig_cable_scatter(cable: pd.DataFrame) -> dict | None:
+def _filter_cable_by_amp(cable: pd.DataFrame, amp: int | None) -> pd.DataFrame:
+    if cable.empty or amp is None:
+        return cable
+    d = cable.copy()
+    d["i_bin"] = d["i_max"].round().astype(int)
+    return d[d["i_bin"] == int(amp)].copy()
+
+
+def fig_cable_scatter(cable: pd.DataFrame, amp: int | None = None) -> dict | None:
     """Streudiagramm Ist-Strom (x) vs. waermster Sensor (y).
     Farbcodiert nach Zeit - so sieht man die Entwicklung ueber den Zeitraum."""
+    cable = _filter_cable_by_amp(cable, amp)
     if cable.empty or len(cable) < 5:
         return None
 
@@ -2213,7 +2222,8 @@ def fig_cable_scatter(cable: pd.DataFrame) -> dict | None:
         })
 
     layout = {
-        "title": "Strom vs. waermster Sensor (alle CHARGING-Samples)",
+        "title": ("Strom vs. waermster Sensor"
+                  + (f" ({amp} A)" if amp is not None else " (alle CHARGING-Samples)")),
         "height": 480,
         "margin": {"l": 60, "r": 120, "t": 55, "b": 60},
         "xaxis": {"title": "Ist-Strom I (A)"},
@@ -2225,8 +2235,9 @@ def fig_cable_scatter(cable: pd.DataFrame) -> dict | None:
     return {"data": traces, "layout": layout}
 
 
-def fig_cable_socket_scatter(cable: pd.DataFrame) -> dict | None:
+def fig_cable_socket_scatter(cable: pd.DataFrame, amp: int | None = None) -> dict | None:
     """Strom (x) vs. Steckdosen-/Schuko-Temperatur (y)."""
+    cable = _filter_cable_by_amp(cable, amp)
     if cable.empty or len(cable) < 5:
         return None
 
@@ -2309,7 +2320,8 @@ def fig_cable_socket_scatter(cable: pd.DataFrame) -> dict | None:
         })
 
     layout = {
-        "title": "Strom vs. Steckdose / Schuko-Adapter",
+        "title": ("Strom vs. Steckdose / Schuko-Adapter"
+                  + (f" ({amp} A)" if amp is not None else "")),
         "height": 480,
         "margin": {"l": 60, "r": 120, "t": 55, "b": 60},
         "xaxis": {"title": "Ist-Strom I (A)"},
@@ -2469,6 +2481,8 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
                 '</section>')
 
     adapter_max_a = _get_adapter_max_a()
+    amp_bins = sorted(int(v) for v in cable["i_max"].round().dropna().astype(int).unique().tolist())
+
     fig_scatter = fig_cable_scatter(cable)
     fig_socket  = fig_cable_socket_scatter(cable)
     fig_box     = fig_cable_boxplot(cable)
@@ -2476,6 +2490,26 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
     if fig_scatter: plots_out["plot-cable-scatter"] = fig_scatter
     if fig_socket:  plots_out["plot-cable-socket"]  = fig_socket
     if fig_box:     plots_out["plot-cable-box"]     = fig_box
+
+    cable_views: list[str] = []
+    if fig_scatter:
+        cable_views.append('<div class="cable-view" id="cable-view-warmest-all">' + _plot_div("plot-cable-scatter") + '</div>')
+    if fig_socket:
+        cable_views.append('<div class="cable-view hidden" id="cable-view-socket-all">' + _plot_div("plot-cable-socket") + '</div>')
+    if fig_box:
+        cable_views.append('<div class="cable-view hidden" id="cable-view-box-all">' + _plot_div("plot-cable-box") + '</div>')
+
+    for amp in amp_bins:
+        fig_scatter_amp = fig_cable_scatter(cable, amp)
+        fig_socket_amp = fig_cable_socket_scatter(cable, amp)
+        if fig_scatter_amp:
+            pid = f"plot-cable-scatter-{amp}a"
+            plots_out[pid] = fig_scatter_amp
+            cable_views.append(f'<div class="cable-view hidden" id="cable-view-warmest-{amp}a">' + _plot_div(pid) + '</div>')
+        if fig_socket_amp:
+            pid = f"plot-cable-socket-{amp}a"
+            plots_out[pid] = fig_socket_amp
+            cable_views.append(f'<div class="cable-view hidden" id="cable-view-socket-{amp}a">' + _plot_div(pid) + '</div>')
 
     rec = _cable_recommendation(cable, adapter_max_a)
 
@@ -2489,15 +2523,30 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
         '</p>'
     )
 
+    cable_select = (
+        '<div class="session-selector">'
+        '<label for="cable-plot-select">Grafik: </label>'
+        '<select id="cable-plot-select" onchange="selectCableView()">'
+        '<option value="warmest" selected>waermster Sensor</option>'
+        '<option value="socket">Steckdose / Schuko</option>'
+        '<option value="box">Verteilung je Ampere</option>'
+        '</select>'
+        '<label for="cable-amp-select">Strom: </label>'
+        '<select id="cable-amp-select" onchange="selectCableView()">'
+        '<option value="all" selected>alle Punkte</option>'
+        + ''.join(f'<option value="{amp}a">{amp} A</option>' for amp in amp_bins)
+        + '</select>'
+        '</div>'
+    )
+
     return (
         '<section class="panel" id="panel-cable">'
         '<h2>Kabel-Analyse</h2>'
         + intro
         + '<div class="info-card"><h3>Empfehlung</h3>'
         + rec + '</div>'
-        + (_plot_div("plot-cable-scatter") if "plot-cable-scatter" in plots_out else "")
-        + (_plot_div("plot-cable-socket")  if "plot-cable-socket"  in plots_out else "")
-        + (_plot_div("plot-cable-box")     if "plot-cable-box"     in plots_out else "")
+        + cable_select
+        + ''.join(cable_views)
         + '</section>'
     )
 
@@ -2684,6 +2733,7 @@ HTML_TEMPLATE = """<!doctype html>
   }}
   .analysis-session {{ margin: 1rem 0; }}
   .analysis-session.hidden {{ display: none; }}
+  .cable-view.hidden {{ display: none; }}
 
   .limit-card {{
     background: var(--card); border: 1px solid var(--border);
@@ -2826,6 +2876,28 @@ function selectAnalysisSession(id) {{
   }}
 }}
 
+function selectCableView() {{
+  const plotSel = document.getElementById('cable-plot-select);
+  const ampSel = document.getElementById('cable-amp-select');
+  if (!plotSel || !ampSel) return;
+  const plotType = plotSel.value || 'warmest';
+  const amp = (plotType === 'box') ? 'all' : (ampSel.value || 'all');
+  ampSel.disabled = (plotType === 'box');
+  const targetId = 'cable-view-' + plotType + '-' + amp;
+
+  document.querySelectorAll('.cable-view').forEach(el => {{
+    el.classList.toggle('hidden', el.id !== targetId);
+  }});
+
+  const sec = document.getElementById(targetId);
+  if (sec) {{
+    sec.querySelectorAll('.plot').forEach(el => {{
+      renderPlot(el.id);
+      requestAnimationFrame(() => Plotly.Plots.resize(el));
+    }});
+  }}
+}}
+
 window.addEventListener('resize', () => {{
   document.querySelectorAll('.plot').forEach(el => {{
     if (el.dataset.rendered === "1" && el.offsetParent !== null) {{
@@ -2836,6 +2908,7 @@ window.addEventListener('resize', () => {{
 
 const initial = (location.hash || '').replace('#', '') || "{default_tab}";
 activate(initial, false);
+selectCableView();
 </script>
 </body></html>
 """
