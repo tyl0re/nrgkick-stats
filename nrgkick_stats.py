@@ -669,8 +669,10 @@ def kpi_html(df: pd.DataFrame, sess: pd.DataFrame) -> str:
         max_plug = df[plug_cols].max().max()
         if pd.notna(max_plug):
             items.append((f"{max_plug:.1f} °C", "max. Schuko-Adapter (Wand)"))
+    display_sessions = max(len(sess), len(_connect_blocks(df)))
+    if display_sessions:
+        items.append((str(display_sessions), "Ladesitzungen"))
     if not sess.empty:
-        items.append((str(len(sess)), "Ladesitzungen"))
         total_h = sess["dauer"].sum().total_seconds() / 3600.0
         items.append((f"{total_h:.1f} h", "Ladezeit gesamt"))
     if not items:
