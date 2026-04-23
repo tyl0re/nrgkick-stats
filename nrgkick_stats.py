@@ -545,6 +545,20 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
             mean_i = float(phase_mean) if pd.notna(phase_mean) else float("nan")
         else:
             mean_i = float("nan")
+        energy_session_start = None
+        energy_session_end = None
+        if "energy_session_wh" in grp and grp["energy_session_wh"].notna().any():
+            es = pd.to_numeric(grp["energy_session_wh"], errors="coerce").dropna()
+            if not es.empty:
+                energy_session_start = float(es.iloc[0])
+                energy_session_end = float(es.iloc[-1])
+        energy_total_start = None
+        energy_total_end = None
+        if "energy_total_wh" in grp and grp["energy_total_wh"].notna().any():
+            et = pd.to_numeric(grp["energy_total_wh"], errors="coerce").dropna()
+            if not et.empty:
+                energy_total_start = float(et.iloc[0])
+                energy_total_end = float(et.iloc[-1])
         sessions.append({
             "start":       start,
             "ende":        end,
@@ -553,8 +567,51 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
             "max_w":       max_p,
             "mittel_a":    mean_i,
             "samples":     int(len(grp)),
+            "_es_start":   energy_session_start,
+            "_es_end":     energy_session_end,
+            "_et_start":   energy_total_start,
+            "_et_end":     energy_total_end,
         })
-    return pd.DataFrame(sessions)
+
+    merged: list[dict] = []
+    for cur in sessions:
+        if not merged:
+            merged.append(cur)
+            continue
+        prev = merged[-1]
+        same_charge_counter = (
+            prev.get("_es_end") is not None and cur.get("_es_start") is not None
+            and cur["_es_start"] >= prev["_es_end"]
+        )
+        same_total_counter = (
+            prev.get("_et_end") is not None and cur.get("_et_start") is not None
+            and cur["_et_start"] >= prev["_et_end"]
+        )
+        gap_s = (cur["start"] - prev["ende"]).total_seconds()
+        # Messluecken koennen innerhalb derselben Ladung auftreten. Wenn die
+        # Energiezaehler einfach weiterlaufen, fuehren wir beide Teile wieder
+        # zu einer Sitzung zusammen.
+        if gap_s > 0 and (same_charge_counter or same_total_counter):
+            prev["ende"] = cur["ende"]
+            prev["dauer"] = prev["ende"] - prev["start"]
+            prev["samples"] += cur["samples"]
+            prev["max_w"] = max(prev.get("max_w") or float("nan"), cur.get("max_w") or float("nan"))
+            if prev.get("mittel_a") is None or pd.isna(prev.get("mittel_a")):
+                prev["mittel_a"] = cur.get("mittel_a")
+            elif cur.get("mittel_a") is not None and not pd.isna(cur.get("mittel_a")):
+                prev["mittel_a"] = float(np.nanmean([prev["mittel_a"], cur["mittel_a"]]))
+            if prev.get("_et_start") is not None and cur.get("_et_end") is not None:
+                prev["energie_kwh"] = max(0.0, (cur["_et_end"] - prev["_et_start"]) / 1000.0)
+            elif cur.get("_es_end") is not None:
+                base = prev.get("_es_start") or 0.0
+                prev["energie_kwh"] = max(0.0, (cur["_es_end"] - base) / 1000.0)
+            prev["_es_end"] = cur.get("_es_end") if cur.get("_es_end") is not None else prev.get("_es_end")
+            prev["_et_end"] = cur.get("_et_end") if cur.get("_et_end") is not None else prev.get("_et_end")
+            continue
+        merged.append(cur)
+
+    out = pd.DataFrame(merged)
+    return out.drop(columns=[c for c in ["_es_start", "_es_end", "_et_start", "_et_end"] if c in out.columns])
 
 
 def sessions_table_html(sess: pd.DataFrame) -> str:
