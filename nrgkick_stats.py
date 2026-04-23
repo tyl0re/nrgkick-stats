@@ -1712,6 +1712,13 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         '</div>'
     )
 
+    summary_html = ""
+    if len(blocks) > 1:
+        summary_html = (
+            '<h3 style="margin-top:2rem">Alle Ladevorgaenge im Zeitraum</h3>'
+            + agg_table
+        )
+
     return (
         '<section class="panel" id="panel-analysis">'
         '<h2>Ladevorgang-Analyse</h2>'
@@ -1719,9 +1726,7 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         'Events werden dann fuer diese Session angezeigt. '
         'Die Drosselungserkennung arbeitet adaptiv und orientiert sich am '
         'oberen Quartil der Temperaturen <i>innerhalb</i> der jeweiligen Session.</p>'
-        f'{select_html}{"".join(panels)}'
-        '<h3 style="margin-top:2rem">Alle Ladevorgaenge im Zeitraum</h3>'
-        f'{agg_table}'
+        f'{select_html}{"".join(panels)}{summary_html}'
         '</section>'
     )
 
