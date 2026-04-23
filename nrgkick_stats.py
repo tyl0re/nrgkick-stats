@@ -26,6 +26,7 @@ import sys
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
@@ -65,6 +66,16 @@ def _report_dir() -> Path:
     return _reports_dir(CFG) if CFG else _reports_dir(_CFG_DEFAULTS)
 
 
+def _report_tzinfo():
+    tz_name = _cfg_get("ui.timezone", None)
+    if tz_name:
+        try:
+            return ZoneInfo(str(tz_name))
+        except ZoneInfoNotFoundError as exc:
+            raise SystemExit(f"Unbekannte ui.timezone: {tz_name}") from exc
+    return datetime.now().astimezone().tzinfo
+
+
 # Legacy-kompatible Symbole (damit wenig Code geaendert werden muss)
 DATA_DIR = _db_file().parent
 DB_FILE = _db_file()
@@ -87,7 +98,7 @@ RANGES = {
 
 
 def resolve_range(name: str) -> tuple[datetime | None, datetime]:
-    now = datetime.now(timezone.utc).astimezone()
+    now = datetime.now(timezone.utc).astimezone(_report_tzinfo())
     if name == "today":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return start, now
@@ -115,7 +126,10 @@ def load_samples(start: datetime | None, end: datetime) -> pd.DataFrame:
             )
     if df.empty:
         return df
-    df["ts_local_dt"] = pd.to_datetime(df["ts_local"])
+    # Fuer DST/sommer-winterzeitfeste Auswertung immer ts_utc als gemeinsame
+    # Basis parsen und erst danach in die Anzeige-Zeitzone konvertieren.
+    # Direkte ts_local-Parse scheitert bei gemischten Offsets (+01/+02).
+    df["ts_local_dt"] = pd.to_datetime(df["ts_utc"], utc=True).dt.tz_convert(_report_tzinfo())
     df = df.set_index("ts_local_dt").sort_index()
     return df
 
@@ -1461,16 +1475,9 @@ def events_table_html(events: pd.DataFrame) -> str:
 
 
 def session_label(start: pd.Timestamp, end: pd.Timestamp, n_samples: int) -> str:
-    # tz-agnostisch: wir haben im DF lokale Zeiten (ts_local), also tz-naiv
-    now = pd.Timestamp.now()
-    # Timestamps haben ggf. einen festen Offset (UTC+02:00). Wir wollen die
-    # Wandzeit behalten, nur TZ abschneiden:
-    def _naive(t: pd.Timestamp) -> pd.Timestamp:
-        if t.tzinfo is None:
-            return t
-        return t.tz_localize(None)
-    start_cmp = _naive(start)
-    end_cmp   = _naive(end)
+    now = pd.Timestamp.now(tz=_report_tzinfo())
+    start_cmp = start if start.tzinfo is not None else start.tz_localize(_report_tzinfo())
+    end_cmp   = end if end.tzinfo is not None else end.tz_localize(_report_tzinfo())
     dur_min = (end_cmp - start_cmp).total_seconds() / 60.0
     same_day = start_cmp.normalize() == now.normalize()
     # 10 min Toleranz - passt zu 6 min Polling-Intervall
