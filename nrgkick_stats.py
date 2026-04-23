@@ -665,6 +665,14 @@ def find_current_session(df: pd.DataFrame) -> pd.DataFrame:
 
     ct = pd.to_numeric(df["vehicle_connect_time"], errors="coerce")
     connected = ct.fillna(0) > 0
+
+    # Manche Firmware-/API-Staende lassen vehicle_connect_time nach dem
+    # Abziehen stehen. STANDBY bedeutet laut Status-Enum aber explizit:
+    # kein Fahrzeug angesteckt. Daher beendet STANDBY eine aktuelle Session.
+    if "charging_state" in df.columns:
+        state = df["charging_state"].fillna("").astype(str).str.upper()
+        connected &= state.ne("STANDBY")
+
     if not connected.any():
         return pd.DataFrame()
 
