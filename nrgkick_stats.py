@@ -1017,6 +1017,14 @@ def _connect_blocks(df: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp, 
         return []
     ct = pd.to_numeric(df["vehicle_connect_time"], errors="coerce").fillna(0)
     connected = ct > 0
+
+    # Gleiche Schutzlogik wie bei find_current_session(): vehicle_connect_time
+    # kann nach dem Abziehen stehenbleiben, STANDBY bedeutet aber "kein Fahrzeug
+    # angesteckt" und muss daher den Session-Block beenden.
+    if "charging_state" in df.columns:
+        state = df["charging_state"].fillna("").astype(str).str.upper()
+        connected &= state.ne("STANDBY")
+
     if not connected.any():
         return []
 
@@ -1151,6 +1159,15 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
         out["p_avg_w"]   = float(actively.mean()) if not actively.empty else 0.0
     else:
         out["p_max_w"] = out["p_avg_w"] = 0.0
+
+    if "set_current_a" in sess and sess["set_current_a"].notna().any():
+        set_a = pd.to_numeric(sess["set_current_a"], errors="coerce").dropna()
+        if not set_a.empty:
+            out["set_a_last"] = float(set_a.iloc[-1])
+            out["set_a_min"] = float(set_a.min())
+            out["set_a_max"] = float(set_a.max())
+    if "set_a_last" not in out:
+        out["set_a_last"] = out["set_a_min"] = out["set_a_max"] = None
 
     # Typ2-Stecker-Temp (am Auto)
     t2_cols = [c for c in ["temp_connector_l1", "temp_connector_l2",
@@ -1527,6 +1544,11 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             kpis.append((f"{agg['p_max_w']:.0f} W", "Spitzenleistung"))
         if agg.get("p_avg_w"):
             kpis.append((f"{agg['p_avg_w']:.0f} W", "Ø Leistung"))
+        if agg.get("set_a_last") is not None:
+            if agg.get("set_a_min") is not None and agg.get("set_a_max") is not None and agg["set_a_min"] != agg["set_a_max"]:
+                kpis.append((f"{agg['set_a_last']:.0f} A ({agg['set_a_min']:.0f}-{agg['set_a_max']:.0f} A)", "eingestellter Strom"))
+            else:
+                kpis.append((f"{agg['set_a_last']:.0f} A", "eingestellter Strom"))
         if agg.get("t_stecker_max") is not None:
             kpis.append((f"{agg['t_stecker_max']:.1f} °C", "max. Typ2-Stecker (Auto)"))
         if agg.get("t_schuko_max") is not None:
@@ -1567,6 +1589,7 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     agg_df["kwh"]    = agg_df["kwh"].map(lambda v: f"{v:.2f}")
     agg_df["p_max"]  = agg_df["p_max_w"].map(lambda v: f"{v:.0f}")
     agg_df["p_avg"]  = agg_df["p_avg_w"].map(lambda v: f"{v:.0f}")
+    agg_df["set_a"]  = agg_df["set_a_last"].map(lambda v: "-" if pd.isna(v) else f"{v:.0f} A")
     agg_df["t_t2"]   = agg_df["t_stecker_max"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["t_sch"]  = agg_df.get("t_schuko_max", pd.Series([None]*len(agg_df))).map(
         lambda v: "-" if pd.isna(v) else f"{v:.1f}")
@@ -1575,12 +1598,12 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     agg_df["n_rec"]  = agg_df["n_recovery"]
     agg_table = agg_df.rename(columns={
         "start": "Start", "dauer": "angesteckt", "aktiv": "aktiv",
-        "kwh": "kWh", "p_max": "max W", "p_avg": "Ø W",
+        "kwh": "kWh", "p_max": "max W", "p_avg": "Ø W", "set_a": "Soll A",
         "t_t2":  "Typ2 °C", "t_sch": "Schuko °C", "t_hou": "Gehaeuse °C",
         "n_der": "Derating", "n_rec": "Recovery",
     }).to_html(
         index=False,
-        columns=["Start", "angesteckt", "aktiv", "kWh", "max W", "Ø W",
+        columns=["Start", "angesteckt", "aktiv", "kWh", "max W", "Ø W", "Soll A",
                  "Typ2 °C", "Schuko °C", "Gehaeuse °C", "Derating", "Recovery"],
         classes="sessions", border=0, escape=False,
     )
