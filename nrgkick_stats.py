@@ -245,7 +245,7 @@ def _build_temp_traces(df: pd.DataFrame, *,
 def fig_temperatures_all(df: pd.DataFrame) -> dict | None:
     """Uebersichts-Plot: alle Temperatursensoren in einem Diagramm mit
     gruppierter Legende (klickbar)."""
-    traces = _build_temp_traces(df, use_scattergl=True, include_legacy_mean=False)
+    traces = _build_temp_traces(df, use_scattergl=True, include_legacy_mean=True)
     if not traces:
         return None
     layout = _timeseries_layout(
