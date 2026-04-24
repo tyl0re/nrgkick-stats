@@ -10,6 +10,14 @@ auch als einfacher Loop. Ressourcenverbrauch ist minimal (wenige MB RAM,
 
 ![Dashboard](docs/screenshots/01_dashboard.png)
 
+## Haftungsausschluss
+
+Die Nutzung dieses Projekts erfolgt auf eigene Verantwortung. Ich uebernehme
+keine Haftung fuer Schaeden, Fehlfunktionen, Datenverlust oder Folgeschaeden,
+die durch Installation, Konfiguration oder Verwendung der Software entstehen.
+Jede Person handelt eigenverantwortlich und sollte die Auswirkungen auf
+Wallbox, Fahrzeug, Stromversorgung und lokale Umgebung selbst pruefen.
+
 ## Screenshots
 
 <table>
