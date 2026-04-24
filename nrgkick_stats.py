@@ -639,6 +639,42 @@ def sessions_table_html(sess: pd.DataFrame) -> str:
     )
 
 
+def display_sessions(df: pd.DataFrame) -> pd.DataFrame:
+    """Sichtbare Sitzungen fuer Dashboard/Ladesitzungen.
+
+    Diese Sicht soll mit der Auswahl im Analyse-Tab konsistent sein und basiert
+    daher auf den Einsteck-Bloecken statt auf separater CHARGING-Phasenlogik.
+    """
+    rows: list[dict] = []
+    for start, end, sub in _connect_blocks(df):
+        energy_kwh = None
+        if "energy_total_wh" in sub and sub["energy_total_wh"].notna().any():
+            et = pd.to_numeric(sub["energy_total_wh"], errors="coerce").dropna()
+            if len(et) >= 2:
+                energy_kwh = max(0.0, float(et.iloc[-1] - et.iloc[0]) / 1000.0)
+        if energy_kwh is None and "energy_session_wh" in sub and sub["energy_session_wh"].notna().any():
+            es = pd.to_numeric(sub["energy_session_wh"], errors="coerce").dropna()
+            if not es.empty:
+                energy_kwh = float(es.max()) / 1000.0
+        max_w = float(sub["power_w"].max()) if "power_w" in sub and sub["power_w"].notna().any() else float("nan")
+        phase_cols = [c for c in ["current_l1_a", "current_l2_a", "current_l3_a"] if c in sub.columns]
+        if phase_cols:
+            phase_mean = sub[phase_cols].mean(axis=1).mean()
+            mean_i = float(phase_mean) if pd.notna(phase_mean) else float("nan")
+        else:
+            mean_i = float("nan")
+        rows.append({
+            "start": start,
+            "ende": end,
+            "dauer": end - start,
+            "energie_kwh": energy_kwh,
+            "max_w": max_w,
+            "mittel_a": mean_i,
+            "samples": int(len(sub)),
+        })
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # KPI
 # ---------------------------------------------------------------------------
@@ -3231,7 +3267,7 @@ def _plot_div(plot_id: str, title: str | None = None,
 def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd.DataFrame]:
     """Erzeugt tabs_html, sections_html, plots-dict (JSON-serialisierbar)
     und das sessions-DataFrame."""
-    sess_df = detect_sessions(df)
+    sess_df = display_sessions(df)
     current_df = find_current_session(df)
 
     # alle Plots vorausbauen (werden per JS gerendert, Panels sind schon im DOM)
@@ -3409,7 +3445,7 @@ def render_html(title: str, df: pd.DataFrame, tabs_html: str, sections_html: str
         start_str=start_str,
         end_str=end_str,
         samples=len(df),
-        kpi_html=kpi_html(df, detect_sessions(df)),
+        kpi_html=kpi_html(df, display_sessions(df)),
         tabs_html=tabs_html,
         sections_html=sections_html,
         plots_json=json.dumps(plots, ensure_ascii=False, default=str),
