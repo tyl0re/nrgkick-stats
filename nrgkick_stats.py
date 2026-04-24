@@ -222,12 +222,17 @@ def _build_temp_traces(df: pd.DataFrame, *,
     x = _ts_to_list(df.index)
     traces: list[dict] = []
     mode = "scattergl" if use_scattergl else "scatter"
+    min_points = 5
     for col, label, color, group in TEMP_DEFS:
         if col == "temp_domestic_plug" and not include_legacy_mean:
             continue
         y = _col(df, col)
         if y is None:
             continue
+        if col in {"temp_domestic_plug_1", "temp_domestic_plug_2"}:
+            valid_points = sum(v is not None for v in y)
+            if valid_points < min_points:
+                continue
         dash = "dot" if col == "temp_domestic_plug" else "solid"
         traces.append({
             "type": mode,
