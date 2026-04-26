@@ -934,14 +934,7 @@ def _session_cost_eur(kwh: float | None) -> float | None:
     return max(0.0, float(kwh) * price)
 
 
-def _session_co2_kg(kwh: float | None) -> float | None:
-    # Show CO2 estimate; if no CO2 factor configured, fallback to 0.0
-    if kwh is None:
-        return None
-    co2_g_per_kwh = _configured_float("costs.co2_g_per_kwh")
-    if co2_g_per_kwh is None:
-        return 0.0
-    return max(0.0, float(kwh) * co2_g_per_kwh / 1000.0)
+ 
 
 
 def _max_relevant_temp(sess_df: pd.DataFrame) -> float | None:
@@ -1059,9 +1052,6 @@ def current_session_kpis(sess_df: pd.DataFrame) -> list[tuple[str, str]]:
     cost = _session_cost_eur(kwh)
     if cost is not None:
         items.append((f"{cost:.2f} €", "Kosten geschaetzt"))
-    co2 = _session_co2_kg(kwh)
-    if co2 is not None:
-        items.append((f"{co2:.1f} kg", "CO2 geschaetzt"))
     if limit_wh is not None:
         if limit_wh <= 0:
             items.append(("- kein Limit -", "Energy-Limit"))
@@ -1475,7 +1465,6 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
         if out["aktiv_min"] > 0 else 0.0
     )
     out["cost_eur"] = _session_cost_eur(out["kwh"])
-    out["co2_kg"] = _session_co2_kg(out["kwh"])
 
     if "power_w" in sess:
         out["p_max_w"]   = float(sess["power_w"].max())
@@ -1984,8 +1973,6 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             kpis.append((f"{agg['schuko_c_per_a']:.2f} °C/A", "Schuko pro Ampere"))
         if agg.get("cost_eur") is not None:
             kpis.append((f"{agg['cost_eur']:.2f} €", "Kosten geschaetzt"))
-        if agg.get("co2_kg") is not None:
-            kpis.append((f"{agg['co2_kg']:.1f} kg", "CO2 geschaetzt"))
         if agg.get("n_derating"):
             kpis.append((str(agg["n_derating"]), "therm. Derating-Events"))
         if agg.get("n_recovery"):
@@ -2031,7 +2018,6 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     agg_df["t_hou"]  = agg_df["t_housing_max"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["reserve"] = agg_df["thermal_reserve_c"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["cost"] = agg_df["cost_eur"].map(lambda v: "-" if pd.isna(v) else f"{v:.2f}")
-    agg_df["co2"] = agg_df["co2_kg"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["n_der"]  = agg_df["n_derating"]
     agg_df["n_rec"]  = agg_df["n_recovery"]
     agg_columns = [
@@ -2040,14 +2026,12 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     ]
     if agg_df["cost_eur"].notna().any():
         agg_columns.append("Kosten €")
-    if agg_df["co2_kg"].notna().any():
-        agg_columns.append("CO2 kg")
     agg_columns.extend(["Derating", "Recovery"])
     agg_table = agg_df.rename(columns={
         "start": "Start", "dauer": "angesteckt", "aktiv": "aktiv", "standby": "Standzeit",
         "kwh": "kWh", "p_eff": "eff. W", "p_max": "max W", "p_avg": "Ø W", "set_a": "Soll A",
         "t_t2":  "Typ2 °C", "t_sch": "Schuko °C", "t_hou": "Gehaeuse °C",
-        "reserve": "Reserve °C", "cost": "Kosten €", "co2": "CO2 kg",
+        "reserve": "Reserve °C", "cost": "Kosten €",
         "n_der": "Derating", "n_rec": "Recovery",
     }).to_html(
         index=False,
