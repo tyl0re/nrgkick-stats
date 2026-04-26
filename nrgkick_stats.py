@@ -935,9 +935,12 @@ def _session_cost_eur(kwh: float | None) -> float | None:
 
 
 def _session_co2_kg(kwh: float | None) -> float | None:
-    co2_g_per_kwh = _configured_float("costs.co2_g_per_kwh")
-    if co2_g_per_kwh is None or kwh is None:
+    # Show CO2 estimate; if no CO2 factor configured, fallback to 0.0
+    if kwh is None:
         return None
+    co2_g_per_kwh = _configured_float("costs.co2_g_per_kwh")
+    if co2_g_per_kwh is None:
+        return 0.0
     return max(0.0, float(kwh) * co2_g_per_kwh / 1000.0)
 
 
@@ -1264,6 +1267,14 @@ def current_session_html(sess_df: pd.DataFrame,
         for value, label in items
     )
     kpi_block = f'<div class="kpis">{kpi_parts}</div>' if kpi_parts else ""
+    # Fallback: ensure KPI strip is visible even if data is momentarily unavailable
+    if not kpi_block:
+        kpi_block = (
+            '<div class="kpis">'
+            '<div class="kpi"><div class="v">-</div><div class="l">Kosten geschaetzt</div></div>'
+            '<div class="kpi"><div class="v">-</div><div class="l">CO2 geschaetzt</div></div>'
+            '</div>'
+        )
     limit_block = _energy_limit_progress_html(sess_df)
 
     # Figures registrieren

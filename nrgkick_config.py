@@ -72,7 +72,7 @@ DEFAULTS: dict[str, Any] = {
         "recovery_cooldown_c":   3.0,    # °C unter Derating-Peak = Recovery
     },
     "costs": {
-        "electricity_price_eur_per_kwh": None,  # z.B. 0.35 fuer Kostenschaetzung
+        "electricity_price_eur_per_kwh": 0.265,  # default cost per kWh (EUR)
         "co2_g_per_kwh":                 None,  # z.B. 380 fuer CO2-Schaetzung
     },
     "report": {
