@@ -132,6 +132,9 @@ def _resolve_data_dir(data_dir_template: str) -> Path:
 
 def default_data_dir() -> Path:
     """Public: Wo liegen Config/DB/Logs by default."""
+    env_dir = os.environ.get("NRGKICK_DATA_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
     return _resolve_data_dir(DEFAULTS["data"]["data_dir"])
 
 
@@ -214,7 +217,11 @@ def load_config(explicit_path: str | None = None,
 
     # Pfade aufloesen
     merged["_config_file"] = str(cfg_path)
-    merged["_data_dir"]    = str(_resolve_data_dir(merged["data"]["data_dir"]))
+    env_dir = os.environ.get("NRGKICK_DATA_DIR")
+    merged["_data_dir"] = str(
+        Path(env_dir).expanduser().resolve()
+        if env_dir else _resolve_data_dir(merged["data"]["data_dir"])
+    )
     return merged
 
 
