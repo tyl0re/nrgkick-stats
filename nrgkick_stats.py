@@ -3443,8 +3443,12 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
 def render_html(title: str, df: pd.DataFrame, tabs_html: str, sections_html: str,
                 plots: dict, default_tab: str,
                 start: datetime | None, end: datetime) -> str:
-    start_str = start.strftime("%Y-%m-%d %H:%M") if start else "Anfang"
-    end_str   = end.strftime("%Y-%m-%d %H:%M")
+    if not df.empty:
+        start_str = df.index.min().strftime("%Y-%m-%d %H:%M")
+        end_str   = df.index.max().strftime("%Y-%m-%d %H:%M")
+    else:
+        start_str = start.strftime("%Y-%m-%d %H:%M") if start else "Anfang"
+        end_str   = end.strftime("%Y-%m-%d %H:%M")
     return HTML_TEMPLATE.format(
         title=title,
         start_str=start_str,
