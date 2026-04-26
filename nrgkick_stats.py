@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import logging
 import sqlite3
 import sys
 import webbrowser
@@ -33,12 +33,14 @@ import pandas as pd
 
 
 from nrgkick_config import (
-    APP_NAME,
     load_config as _load_cfg,
     db_path as _db_path,
     reports_dir as _reports_dir,
     DEFAULTS as _CFG_DEFAULTS,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 # Wird in main() mit der konkreten Config gefuellt, damit Hilfsfunktionen
@@ -312,9 +314,12 @@ def temperature_tiles_html(df: pd.DataFrame) -> str:
 
     def _color_for(v: float) -> tuple[str, str]:
         """Liefert (Hintergrund, Akzent-Farbe) abhaengig von Temperatur."""
-        if v >= 75:   return ("rgba(214,39,40,0.18)", "#d62728")
-        if v >= 60:   return ("rgba(255,127,14,0.18)", "#ff7f0e")
-        if v >= 40:   return ("rgba(255,215,0,0.18)", "#c9a227")
+        if v >= 75:
+            return ("rgba(214,39,40,0.18)", "#d62728")
+        if v >= 60:
+            return ("rgba(255,127,14,0.18)", "#ff7f0e")
+        if v >= 40:
+            return ("rgba(255,215,0,0.18)", "#c9a227")
         return ("rgba(44,160,44,0.12)", "#2ca02c")
 
     tiles: list[str] = []
@@ -522,10 +527,12 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
     s["is_charging"] = (s["charging_state"] == "CHARGING").astype(int)
 
     # Session-Grenzen detektieren durch Luecken > X Minuten
+    dt = s.index.to_series().diff().dt.total_seconds().fillna(0)
+    positive_dt = dt[dt > 0]
+    median_dt = float(positive_dt.median()) if not positive_dt.empty else 0.0
     min_gap_s = float(_cfg_get("thresholds.session_gap_minutes", 15.0)) * 60.0
     gap_threshold = max(median_dt * 3.0, min_gap_s)
 
-    dt = s.index.to_series().diff().dt.total_seconds().fillna(0)
     gap_break = (dt > gap_threshold).astype(int)
     state_change = (s["is_charging"].diff().abs().fillna(1) > 0).astype(int)
     s["group"] = (state_change | gap_break).cumsum()
@@ -564,11 +571,18 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
             mean_i = float("nan")
         energy_session_start = None
         energy_session_end = None
+        energy_total_start = None
+        energy_total_end = None
         if "energy_session_wh" in grp and grp["energy_session_wh"].notna().any():
             es = pd.to_numeric(grp["energy_session_wh"], errors="coerce").dropna()
             if not es.empty:
                 energy_session_start = float(es.iloc[0])
                 energy_session_end   = float(es.iloc[-1])
+        if "energy_total_wh" in grp and grp["energy_total_wh"].notna().any():
+            et = pd.to_numeric(grp["energy_total_wh"], errors="coerce").dropna()
+            if not et.empty:
+                energy_total_start = float(et.iloc[0])
+                energy_total_end = float(et.iloc[-1])
 
         # Wenn der Gruppe-Start nicht dem ersten Reset folgt, versuche den Start ueber Resets zu finden
         actual_start = start
@@ -675,15 +689,8 @@ def display_sessions(df: pd.DataFrame) -> pd.DataFrame:
     """
     rows: list[dict] = []
     for start, end, sub in _connect_blocks(df):
-        energy_kwh = None
-        if "energy_total_wh" in sub and sub["energy_total_wh"].notna().any():
-            et = pd.to_numeric(sub["energy_total_wh"], errors="coerce").dropna()
-            if len(et) >= 2:
-                energy_kwh = max(0.0, float(et.iloc[-1] - et.iloc[0]) / 1000.0)
-        if energy_kwh is None and "energy_session_wh" in sub and sub["energy_session_wh"].notna().any():
-            es = pd.to_numeric(sub["energy_session_wh"], errors="coerce").dropna()
-            if not es.empty:
-                energy_kwh = float(es.max()) / 1000.0
+        display_start = _session_connect_start(sub) or start
+        energy_kwh = _session_energy_kwh(sub)
         max_w = float(sub["power_w"].max()) if "power_w" in sub and sub["power_w"].notna().any() else float("nan")
         phase_cols = [c for c in ["current_l1_a", "current_l2_a", "current_l3_a"] if c in sub.columns]
         if phase_cols:
@@ -692,9 +699,9 @@ def display_sessions(df: pd.DataFrame) -> pd.DataFrame:
         else:
             mean_i = float("nan")
         rows.append({
-            "start": start,
+            "start": display_start,
             "ende": end,
-            "dauer": end - start,
+            "dauer": end - display_start,
             "energie_kwh": energy_kwh,
             "max_w": max_w,
             "mittel_a": mean_i,
@@ -743,10 +750,18 @@ def kpi_html(df: pd.DataFrame, sess: pd.DataFrame) -> str:
     if not sess.empty:
         total_h = sess["dauer"].sum().total_seconds() / 3600.0
         items.append((f"{total_h:.1f} h", "Ladezeit gesamt"))
+    quality = _data_quality_stats(df)
+    if quality.get("coverage_pct") is not None:
+        items.append((f"{quality['coverage_pct']:.0f} %", "Datenabdeckung"))
+    if quality.get("gap_count"):
+        items.append((str(quality["gap_count"]), "Messluecken"))
+        items.append((f"{quality['max_gap_min']:.0f} min", "groesste Luecke"))
     if not items:
         return ""
-    parts = "".join(f'<div class="kpi"><div class="v">{v}</div><div class="l">{l}</div></div>'
-                    for v, l in items)
+    parts = "".join(
+        f'<div class="kpi"><div class="v">{value}</div><div class="l">{label}</div></div>'
+        for value, label in items
+    )
     return f'<div class="kpis">{parts}</div>'
 
 
@@ -789,7 +804,7 @@ def _augment_connect_time_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def find_current_session(df: pd.DataFrame) -> pd.DataFrame:
+def find_current_session(df: pd.DataFrame) -> tuple[pd.DataFrame, bool | None]:
     """Liefert den DataFrame-Ausschnitt seit dem letzten 'Einstecken'.
 
     Heuristik anhand `vehicle_connect_time` (Sekunden seit Anschluss):
@@ -797,12 +812,18 @@ def find_current_session(df: pd.DataFrame) -> pd.DataFrame:
       - ein Sprung auf 0 / None bedeutet: wurde abgezogen
       - wir suchen die *letzte* zusammenhaengende Phase, in der
         vehicle_connect_time > 0 ist UND die bis zum letzten Sample reicht.
+
+    Returns: (session_df, start_from_counter)
+      - session_df: DataFrame mit den Daten der aktuellen Session
+      - start_from_counter: True wenn der Start per vehicle_connect_time berechnet wurde
+                            None wenn der erste Messpunkt als Start verwendet wird
     """
     if df.empty:
-        return df
+        return pd.DataFrame(), None
+
     df = _augment_connect_time_from_raw(df)
     if "vehicle_connect_time" not in df.columns:
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     ct = pd.to_numeric(df["vehicle_connect_time"], errors="coerce")
     connected = ct.fillna(0) > 0
@@ -815,17 +836,65 @@ def find_current_session(df: pd.DataFrame) -> pd.DataFrame:
         connected &= state.ne("STANDBY")
 
     if not connected.any():
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     # Wenn das letzte Sample "nicht mehr verbunden" ist -> gar keine aktive Session
     if not bool(connected.iloc[-1]):
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     # Bloecke mit connected=True finden, den letzten nehmen
     block_id = (connected != connected.shift(fill_value=False)).cumsum()
     last_block = block_id.iloc[-1]
+
     mask = (block_id == last_block) & connected
-    return df.loc[mask].copy()
+    session_df = df.loc[mask].copy()
+    return session_df, True if _session_connect_start(session_df) is not None else None
+
+
+def _session_connect_start(sess_df: pd.DataFrame) -> pd.Timestamp | None:
+    """Berechnet den Einsteckzeitpunkt aus dem Wallbox-Zaehler.
+
+    `vehicle_connect_time` ist die Anzahl Sekunden seit dem Einstecken. Die
+    Messzeitachse bleibt unveraendert; der zurueckgerechnete Start wird nur fuer
+    Anzeige und Dauer-KPI genutzt.
+    """
+    if sess_df.empty or "vehicle_connect_time" not in sess_df:
+        return None
+    ct = pd.to_numeric(sess_df["vehicle_connect_time"], errors="coerce").dropna()
+    if ct.empty:
+        return None
+    last_ct = float(ct.iloc[-1])
+    if last_ct <= 0:
+        return None
+    return sess_df.index[-1] - pd.Timedelta(seconds=last_ct)
+
+
+def _session_energy_kwh(sess_df: pd.DataFrame) -> float | None:
+    """Lademenge fuer eine Einsteck-Session.
+
+    Wenn der Report-Zeitraum erst nach dem Einstecken beginnt, ist die
+    Lifetime-Zaehler-Differenz nur eine Teilmenge. Dann ist der Wallbox-
+    Sessionzaehler konsistenter zu Startzeit und Dauer.
+    """
+    if sess_df.empty:
+        return None
+
+    es_kwh = None
+    if "energy_session_wh" in sess_df and sess_df["energy_session_wh"].notna().any():
+        es = pd.to_numeric(sess_df["energy_session_wh"], errors="coerce").dropna()
+        if not es.empty:
+            es_kwh = max(0.0, float(es.max()) / 1000.0)
+
+    et_kwh = None
+    if "energy_total_wh" in sess_df and sess_df["energy_total_wh"].notna().any():
+        et = pd.to_numeric(sess_df["energy_total_wh"], errors="coerce").dropna()
+        if len(et) >= 2:
+            et_kwh = max(0.0, float(et.iloc[-1] - et.iloc[0]) / 1000.0)
+
+    connect_start = _session_connect_start(sess_df)
+    if connect_start is not None and connect_start < sess_df.index[0] and es_kwh is not None:
+        return es_kwh
+    return et_kwh if et_kwh is not None else es_kwh
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -839,51 +908,102 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}m"
 
 
-def _logger_was_inactive_before_first_charging(df: pd.DataFrame) -> bool:
-    """Prueft ob Logger inaktiv war vor dem ersten CHARGING im Log.
-    
-    Wenn der erste CHARGING-Punkt > 1 Std nach dem ersten DB-Eintrag liegt,
-    geht man davon aus, dass das Auto schon eingesteckt war als Logger startete.
-    """
+def _fmt_optional_float(value, suffix: str = "") -> str:
+    try:
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.1f}{suffix}"
+    except Exception:
+        return "-"
+
+
+def _configured_float(path: str) -> float | None:
+    value = _cfg_get(path, None)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_cost_eur(kwh: float | None) -> float | None:
+    price = _configured_float("costs.electricity_price_eur_per_kwh")
+    if price is None or kwh is None:
+        return None
+    return max(0.0, float(kwh) * price)
+
+
+def _session_co2_kg(kwh: float | None) -> float | None:
+    co2_g_per_kwh = _configured_float("costs.co2_g_per_kwh")
+    if co2_g_per_kwh is None or kwh is None:
+        return None
+    return max(0.0, float(kwh) * co2_g_per_kwh / 1000.0)
+
+
+def _max_relevant_temp(sess_df: pd.DataFrame) -> float | None:
+    temp_cols = [
+        c for c in [
+            "temp_domestic_plug",
+            "temp_domestic_plug_1",
+            "temp_domestic_plug_2",
+            "temp_connector_l1",
+            "temp_connector_l2",
+            "temp_connector_l3",
+            "temp_housing",
+        ]
+        if c in sess_df.columns and sess_df[c].notna().any()
+    ]
+    if not temp_cols:
+        return None
+    max_temp = pd.to_numeric(sess_df[temp_cols].stack(), errors="coerce").max()
+    return float(max_temp) if pd.notna(max_temp) else None
+
+
+def _data_quality_stats(df: pd.DataFrame) -> dict:
     if df.empty or len(df) < 2:
-        return False
-    
-    # Erster und letzter Timestamp in der gesamten DB (lokal)
-    first_ts = df.index[0]
-    
-    # Erster CHARGING-Punkt
-    charging_mask = df.get("charging_state") == "CHARGING" if "charging_state" in df.columns else pd.Series(False, index=df.index)
-    if not charging_mask.any():
-        return False
-    
-    first_charging_ts = df[charging_mask].index[0]
-    
-    # Wenn > 1 Std Dazwischen, war Logger wahrscheinlich inaktiv
-    gap_hours = (first_charging_ts - first_ts).total_seconds() / 3600.0
-    return gap_hours > 1.0
+        return {}
+    dt = df.index.to_series().diff().dt.total_seconds().dropna()
+    if dt.empty:
+        return {}
+    interval_s = float(_cfg_get("polling.interval_seconds", 360.0))
+    expected = int(max(1, round((df.index[-1] - df.index[0]).total_seconds() / interval_s) + 1))
+    coverage = min(100.0, max(0.0, len(df) / expected * 100.0)) if expected else None
+    gap_threshold = max(interval_s * 1.5, interval_s + 60.0)
+    gaps = dt[dt > gap_threshold]
+    return {
+        "coverage_pct": coverage,
+        "max_gap_min": float(dt.max()) / 60.0,
+        "gap_count": int(len(gaps)),
+        "expected_samples": expected,
+    }
 
 
 def current_session_kpis(sess_df: pd.DataFrame) -> list[tuple[str, str]]:
+    """Berechnet KPIs für aktuelle Session.
+
+    Berechnet die Einsteckdauer basierend auf vehicle_connect_time.
+    """
     if sess_df.empty:
         return []
+
     start = sess_df.index[0]
     end   = sess_df.index[-1]
-    connect_s = float(sess_df["vehicle_connect_time"].iloc[-1]) \
-        if "vehicle_connect_time" in sess_df and sess_df["vehicle_connect_time"].notna().any() \
-        else (end - start).total_seconds()
+
+    connect_s = None
+    if "vehicle_connect_time" in sess_df and sess_df["vehicle_connect_time"].notna().any():
+        ct = pd.to_numeric(sess_df["vehicle_connect_time"], errors="coerce").dropna()
+        if not ct.empty and float(ct.iloc[-1]) > 0:
+            connect_s = float(ct.iloc[-1])
+
+    if connect_s is None:
+        connect_s = (end - start).total_seconds()
 
     charging_s = None
     if "vehicle_charging_time" in sess_df and sess_df["vehicle_charging_time"].notna().any():
         charging_s = float(pd.to_numeric(sess_df["vehicle_charging_time"], errors="coerce").dropna().iloc[-1])
 
-    # kWh seit Einstecken: aus energy_total_wh-Differenz (monoton)
-    kwh = None
-    if "energy_total_wh" in sess_df and sess_df["energy_total_wh"].notna().any():
-        e = sess_df["energy_total_wh"].dropna()
-        if len(e) >= 1:
-            kwh = float(e.iloc[-1] - e.iloc[0]) / 1000.0
-    if kwh is None and "energy_session_wh" in sess_df and sess_df["energy_session_wh"].notna().any():
-        kwh = float(sess_df["energy_session_wh"].max()) / 1000.0
+    kwh = _session_energy_kwh(sess_df)
 
     cur_p = None
     if "power_w" in sess_df and sess_df["power_w"].notna().any():
@@ -914,6 +1034,13 @@ def current_session_kpis(sess_df: pd.DataFrame) -> list[tuple[str, str]]:
     items.append((_fmt_duration(connect_s), "angesteckt seit"))
     if charging_s is not None:
         items.append((_fmt_duration(charging_s), "aktive Ladezeit"))
+    standby_s = max(0.0, connect_s - charging_s) if charging_s is not None else None
+    if standby_s is not None:
+        items.append((_fmt_duration(standby_s), "Standzeit"))
+    if kwh is not None and connect_s > 0:
+        items.append((f"{(kwh * 3600.0 / connect_s):.2f} kW", "effektiv angesteckt"))
+    if kwh is not None and charging_s and charging_s > 0:
+        items.append((f"{(kwh * 3600.0 / charging_s):.2f} kW", "effektiv aktiv"))
     if cur_p is not None:
         items.append((f"{cur_p:.0f} W", "aktuelle Leistung"))
     if avg_p is not None:
@@ -922,6 +1049,16 @@ def current_session_kpis(sess_df: pd.DataFrame) -> list[tuple[str, str]]:
         items.append((str(state), "Status"))
     if set_i is not None and pd.notna(set_i):
         items.append((f"{float(set_i):.0f} A", "Soll-Strom"))
+    max_temp = _max_relevant_temp(sess_df)
+    hot_temp = float(_cfg_get("thresholds.temperature_hot", 75.0))
+    if max_temp is not None:
+        items.append((f"{max(0.0, hot_temp - max_temp):.1f} °C", "thermische Reserve"))
+    cost = _session_cost_eur(kwh)
+    if cost is not None:
+        items.append((f"{cost:.2f} €", "Kosten geschaetzt"))
+    co2 = _session_co2_kg(kwh)
+    if co2 is not None:
+        items.append((f"{co2:.1f} kg", "CO2 geschaetzt"))
     if limit_wh is not None:
         if limit_wh <= 0:
             items.append(("- kein Limit -", "Energy-Limit"))
@@ -1073,22 +1210,12 @@ def _energy_limit_progress_html(sess_df: pd.DataFrame) -> str:
     limit_wh = float(lim.iloc[-1])
     if limit_wh <= 0:
         return ""  # kein Limit gesetzt
-    # Geladene kWh seit Einstecken
-    loaded_wh = None
-    if "energy_total_wh" in sess_df and sess_df["energy_total_wh"].notna().any():
-        s = sess_df["energy_total_wh"].dropna()
-        if len(s) >= 1:
-            loaded_wh = float(s.iloc[-1] - s.iloc[0])
-    if loaded_wh is None and "energy_session_wh" in sess_df:
-        loaded_wh = float(sess_df["energy_session_wh"].max() or 0)
-    if loaded_wh is None:
-        loaded_wh = 0.0
+    loaded_wh = (_session_energy_kwh(sess_df) or 0.0) * 1000.0
 
     pct = max(0.0, min(100.0, (loaded_wh / limit_wh) * 100.0))
     remaining_wh = max(0.0, limit_wh - loaded_wh)
     # Farbcodierung: orange ab 80 %, rot ab 95 % / erreicht
     if pct >= 95:
-        bar_color = "var(--accent)"
         bar_bg = "linear-gradient(90deg, #d62728, #b00)"
     elif pct >= 80:
         bar_bg = "linear-gradient(90deg, #ff7f0e, #d06000)"
@@ -1113,13 +1240,12 @@ def _energy_limit_progress_html(sess_df: pd.DataFrame) -> str:
 
 def current_session_html(sess_df: pd.DataFrame,
                          plots_out: dict,
-                         start_estimated: bool | None = None) -> str:
+                         start_from_counter: bool | None = None) -> str:
     """Baut den kompletten Panel-Inhalt fuer den 'current'-Tab
     und registriert die zugehoerigen Plot-Specs in plots_out.
     
-    start_estimated=True  -> Start wurde per Energie/Sprung geschätzt
-    start_estimated=False -> Start ist ungewiss (Logger war inaktiv)
-    start_estimated=None  -> Exakter Start bekannt
+    start_from_counter=True -> Start wurde aus vehicle_connect_time berechnet
+    start_from_counter=None -> erster Messpunkt wird als Start angezeigt
     """
     if sess_df.empty:
         return ('<section class="panel" id="panel-current">'
@@ -1134,8 +1260,8 @@ def current_session_html(sess_df: pd.DataFrame,
     # KPI
     items = current_session_kpis(sess_df)
     kpi_parts = "".join(
-        f'<div class="kpi"><div class="v">{v}</div><div class="l">{l}</div></div>'
-        for v, l in items
+        f'<div class="kpi"><div class="v">{value}</div><div class="l">{label}</div></div>'
+        for value, label in items
     )
     kpi_block = f'<div class="kpis">{kpi_parts}</div>' if kpi_parts else ""
     limit_block = _energy_limit_progress_html(sess_df)
@@ -1160,16 +1286,15 @@ def current_session_html(sess_df: pd.DataFrame,
         plots_out["plot-cur-currents"] = fig_currents
         blocks.append(_plot_div("plot-cur-currents"))
 
-    start_str = sess_df.index[0].strftime("%Y-%m-%d %H:%M")
+    actual_start_ts = _session_connect_start(sess_df)
+    start_ts = actual_start_ts if actual_start_ts is not None else sess_df.index[0]
+    start_str = start_ts.strftime("%Y-%m-%d %H:%M")
     end_str   = sess_df.index[-1].strftime("%Y-%m-%d %H:%M")
+
     # Klar kommunizieren, wenn Startzeitpunkt ungewiss ist
-    if start_estimated is False:
-        head = (f'<p class="sub">angesteckt seit <b>{start_str}</b> '
-                f'(Logger war inaktiv - exakter Start unbekannt) &middot; '
-                f'Stand <b>{end_str}</b> &middot; {len(sess_df)} Messpunkte</p>')
-    elif start_estimated is True:
+    if start_from_counter is True:
         head = (f'<p class="sub">angesteckt seit <b>{start_str}</b>'
-                f' (geschaezt) &middot; Stand <b>{end_str}</b> '
+                f' (aus Wallbox-Zaehler) &middot; Stand <b>{end_str}</b> '
                 f'&middot; {len(sess_df)} Messpunkte</p>')
     else:
         head = (f'<p class="sub">angesteckt seit <b>{start_str}</b> &middot; '
@@ -1328,11 +1453,18 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
     else:
         out["aktiv_min"] = float((sess["charging_state"] == "CHARGING").sum())  # 1/min
 
-    if "energy_total_wh" in sess and sess["energy_total_wh"].notna().any():
-        e = sess["energy_total_wh"].dropna()
-        out["kwh"] = float(e.iloc[-1] - e.iloc[0]) / 1000.0 if len(e) >= 2 else 0.0
-    else:
-        out["kwh"] = float(sess.get("energy_session_wh", pd.Series()).max() or 0) / 1000.0
+    out["kwh"] = _session_energy_kwh(sess) or 0.0
+    out["standby_min"] = max(0.0, out["angesteckt_min"] - out["aktiv_min"])
+    out["p_eff_plugged_w"] = (
+        out["kwh"] * 1000.0 * 60.0 / out["angesteckt_min"]
+        if out["angesteckt_min"] > 0 else 0.0
+    )
+    out["p_eff_active_w"] = (
+        out["kwh"] * 1000.0 * 60.0 / out["aktiv_min"]
+        if out["aktiv_min"] > 0 else 0.0
+    )
+    out["cost_eur"] = _session_cost_eur(out["kwh"])
+    out["co2_kg"] = _session_co2_kg(out["kwh"])
 
     if "power_w" in sess:
         out["p_max_w"]   = float(sess["power_w"].max())
@@ -1362,6 +1494,15 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
     out["t_schuko_max"] = float(sess[schuko_cols].max().max()) if schuko_cols else None
     out["t_housing_max"] = float(sess["temp_housing"].max()) \
         if "temp_housing" in sess and sess["temp_housing"].notna().any() else None
+    out["t_max"] = _max_relevant_temp(sess)
+    hot_temp = float(_cfg_get("thresholds.temperature_hot", 75.0))
+    out["thermal_reserve_c"] = (
+        max(0.0, hot_temp - out["t_max"]) if out["t_max"] is not None else None
+    )
+    if out["t_schuko_max"] is not None and out.get("set_a_last"):
+        out["schuko_c_per_a"] = out["t_schuko_max"] / out["set_a_last"]
+    else:
+        out["schuko_c_per_a"] = None
 
     if not events.empty:
         out["n_derating"] = int((events["typ"] == "Derating (thermisch)").sum())
@@ -1710,26 +1851,6 @@ def session_label(start: pd.Timestamp, end: pd.Timestamp, n_samples: int) -> str
     return f"{start_cmp.strftime('%a %d.%m. %H:%M')} ({dur_min:.0f} min)"
 
 
-def session_label_with_est(start: pd.Timestamp, est_start: pd.Timestamp | None, end: pd.Timestamp, n_samples: int) -> str:
-    """Label mit geschaeztem Start, falls vorhanden."""
-    now = pd.Timestamp.now(tz=_report_tzinfo())
-    if est_start is not None:
-        est_cmp = est_start if est_start.tzinfo is not None else est_start.tz_localize(_report_tzinfo())
-        start_cmp = start if start.tzinfo is not None else start.tz_localize(_report_tzinfo())
-        end_cmp   = end if end.tzinfo is not None else end.tz_localize(_report_tzinfo())
-        # Wenn geschaezter Start vor dem offiziellen Start liegt, zeige beide an
-        if est_cmp < start_cmp:
-            dur_min = (end_cmp - est_cmp).total_seconds() / 60.0
-            same_day = est_cmp.normalize() == now.normalize()
-            if same_day and (now - end_cmp).total_seconds() < 600:
-                return f"Aktuell (geschaezt seit {est_cmp.strftime('%H:%M')}, {dur_min:.0f} min)"
-            if same_day:
-                return f"Heute {est_cmp.strftime('%H:%M')} - {end_cmp.strftime('%H:%M')} ({dur_min:.0f} min)"
-            return f"{est_cmp.strftime('%a %d.%m. %H:%M')} - {end_cmp.strftime('%H:%M')} ({dur_min:.0f} min)"
-
-    return session_label(start, end, n_samples)
-
-
 def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     """Erzeugt die Ladevorgang-Analyse. Pro Session werden alle Plots und
     Tabellen erzeugt; per JS-Dropdown wird nur einer sichtbar gemacht."""
@@ -1752,16 +1873,10 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     for idx, (start, end, sub) in enumerate(blocks):
         events = detect_derating_events(sub)
         agg = session_aggregates(sub, events)
-        
-        # Kennzeichnen ob Start geschätzt oder ungewiss ist
-        start_known = not pd.to_numeric(sub.get("vehicle_connect_time",[]), errors="coerce").fillna(0).max() <= 0
-        
-        if _logger_was_inactive_before_first_charging(sub):
-            agg["_label"] = f"{session_label(start, end, len(sub))} (Logger inaktiv - Start unbekannt)"
-        elif not start_known:
-            agg["_label"] = f"{session_label(start, end, len(sub))} (geschätzt)"
-        else:
-            agg["_label"] = session_label(start, end, len(sub))
+
+        label_start = _session_connect_start(sub) or start
+        agg["_label"] = session_label(label_start, end, len(sub))
+        agg["_label_start"] = label_start
         agg_rows.append(agg)
 
         sid = f"an-{idx}"
@@ -1832,6 +1947,11 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             kpis.append((f"{agg['kwh']:.2f} kWh", "geladen"))
         kpis.append((_fmt_duration(agg.get("angesteckt_min", 0) * 60), "angesteckt"))
         kpis.append((_fmt_duration(agg.get("aktiv_min", 0) * 60), "aktiv geladen"))
+        kpis.append((_fmt_duration(agg.get("standby_min", 0) * 60), "Standzeit"))
+        if agg.get("p_eff_plugged_w"):
+            kpis.append((f"{agg['p_eff_plugged_w']/1000.0:.2f} kW", "effektiv angesteckt"))
+        if agg.get("p_eff_active_w"):
+            kpis.append((f"{agg['p_eff_active_w']/1000.0:.2f} kW", "effektiv aktiv"))
         if agg.get("p_max_w"):
             kpis.append((f"{agg['p_max_w']:.0f} W", "Spitzenleistung"))
         if agg.get("p_avg_w"):
@@ -1847,17 +1967,26 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             kpis.append((f"{agg['t_schuko_max']:.1f} °C", "max. Schuko-Adapter (Wand)"))
         if agg.get("t_housing_max") is not None:
             kpis.append((f"{agg['t_housing_max']:.1f} °C", "max. Gehaeuse"))
+        if agg.get("thermal_reserve_c") is not None:
+            kpis.append((f"{agg['thermal_reserve_c']:.1f} °C", "thermische Reserve"))
+        if agg.get("schuko_c_per_a") is not None:
+            kpis.append((f"{agg['schuko_c_per_a']:.2f} °C/A", "Schuko pro Ampere"))
+        if agg.get("cost_eur") is not None:
+            kpis.append((f"{agg['cost_eur']:.2f} €", "Kosten geschaetzt"))
+        if agg.get("co2_kg") is not None:
+            kpis.append((f"{agg['co2_kg']:.1f} kg", "CO2 geschaetzt"))
         if agg.get("n_derating"):
             kpis.append((str(agg["n_derating"]), "therm. Derating-Events"))
         if agg.get("n_recovery"):
             kpis.append((str(agg["n_recovery"]), "Recovery-Events"))
 
         kpi_html_ = "".join(
-            f'<div class="kpi"><div class="v">{v}</div><div class="l">{l}</div></div>'
-            for v, l in kpis
+            f'<div class="kpi"><div class="v">{value}</div><div class="l">{label}</div></div>'
+            for value, label in kpis
         )
+        label_start = agg.get("_label_start", start)
         head = (f'<p class="sub">Session: <b>{agg["_label"]}</b> &middot; '
-                f'{start.strftime("%Y-%m-%d %H:%M")} - {end.strftime("%H:%M")} '
+                f'{label_start.strftime("%Y-%m-%d %H:%M")} - {end.strftime("%H:%M")} '
                 f'&middot; {len(sub)} Messpunkte</p>')
         hide = "" if idx == 0 else " hidden"
         events_tbl_header = ("<h3>Aenderungs-Events</h3>"
@@ -1875,10 +2004,13 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
 
     # Aggregat-Tabelle ueber alle Sessions
     agg_df = pd.DataFrame(agg_rows).copy()
-    agg_df["start"]  = pd.to_datetime(agg_df["start"]).dt.strftime("%Y-%m-%d %H:%M")
+    start_col = agg_df["_label_start"] if "_label_start" in agg_df.columns else agg_df["start"]
+    agg_df["start"]  = pd.to_datetime(start_col).dt.strftime("%Y-%m-%d %H:%M")
     agg_df["dauer"]  = agg_df["angesteckt_min"].map(lambda m: _fmt_duration(m * 60))
     agg_df["aktiv"]  = agg_df["aktiv_min"].map(lambda m: _fmt_duration(m * 60))
+    agg_df["standby"] = agg_df["standby_min"].map(lambda m: _fmt_duration(m * 60))
     agg_df["kwh"]    = agg_df["kwh"].map(lambda v: f"{v:.2f}")
+    agg_df["p_eff"] = agg_df["p_eff_plugged_w"].map(lambda v: f"{v:.0f}")
     agg_df["p_max"]  = agg_df["p_max_w"].map(lambda v: f"{v:.0f}")
     agg_df["p_avg"]  = agg_df["p_avg_w"].map(lambda v: f"{v:.0f}")
     agg_df["set_a"]  = agg_df["set_a_last"].map(lambda v: "-" if pd.isna(v) else f"{v:.0f} A")
@@ -1886,17 +2018,29 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     agg_df["t_sch"]  = agg_df.get("t_schuko_max", pd.Series([None]*len(agg_df))).map(
         lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["t_hou"]  = agg_df["t_housing_max"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
+    agg_df["reserve"] = agg_df["thermal_reserve_c"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
+    agg_df["cost"] = agg_df["cost_eur"].map(lambda v: "-" if pd.isna(v) else f"{v:.2f}")
+    agg_df["co2"] = agg_df["co2_kg"].map(lambda v: "-" if pd.isna(v) else f"{v:.1f}")
     agg_df["n_der"]  = agg_df["n_derating"]
     agg_df["n_rec"]  = agg_df["n_recovery"]
+    agg_columns = [
+        "Start", "angesteckt", "aktiv", "Standzeit", "kWh", "eff. W", "max W", "Ø W", "Soll A",
+        "Typ2 °C", "Schuko °C", "Gehaeuse °C", "Reserve °C",
+    ]
+    if agg_df["cost_eur"].notna().any():
+        agg_columns.append("Kosten €")
+    if agg_df["co2_kg"].notna().any():
+        agg_columns.append("CO2 kg")
+    agg_columns.extend(["Derating", "Recovery"])
     agg_table = agg_df.rename(columns={
-        "start": "Start", "dauer": "angesteckt", "aktiv": "aktiv",
-        "kwh": "kWh", "p_max": "max W", "p_avg": "Ø W", "set_a": "Soll A",
+        "start": "Start", "dauer": "angesteckt", "aktiv": "aktiv", "standby": "Standzeit",
+        "kwh": "kWh", "p_eff": "eff. W", "p_max": "max W", "p_avg": "Ø W", "set_a": "Soll A",
         "t_t2":  "Typ2 °C", "t_sch": "Schuko °C", "t_hou": "Gehaeuse °C",
+        "reserve": "Reserve °C", "cost": "Kosten €", "co2": "CO2 kg",
         "n_der": "Derating", "n_rec": "Recovery",
     }).to_html(
         index=False,
-        columns=["Start", "angesteckt", "aktiv", "kWh", "max W", "Ø W", "Soll A",
-                 "Typ2 °C", "Schuko °C", "Gehaeuse °C", "Derating", "Recovery"],
+        columns=agg_columns,
         classes="sessions", border=0, escape=False,
     )
 
@@ -1916,6 +2060,7 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         'Die Drosselungserkennung arbeitet adaptiv und orientiert sich am '
         'oberen Quartil der Temperaturen <i>innerhalb</i> der jeweiligen Session.</p>'
         f'{select_html}{"".join(panels)}'
+        f'<h3>Uebersicht</h3>{agg_table}'
         '</section>'
     )
 
@@ -1976,8 +2121,10 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
             })
             d["count"] += ep["samples"]
             d["episodes"] += 1
-            if ep["start"] < d["first"]: d["first"] = ep["start"]
-            if ep["ende"]  > d["last"]:  d["last"]  = ep["ende"]
+            if ep["start"] < d["first"]:
+                d["first"] = ep["start"]
+            if ep["ende"] > d["last"]:
+                d["last"] = ep["ende"]
             d["total_min"] += ep["dauer_min"]
         out = pd.DataFrame(agg.values())
         out["beschreibung"] = out["code"].apply(lambda c: _decode_code(c, kind))
@@ -2389,11 +2536,16 @@ def build_info_panel() -> str:
         rssi_text = None
         if rssi is not None:
             # RSSI-Qualitaet: >-50 super, -50..-60 gut, -60..-70 ok, -70..-80 schwach, <-80 kritisch
-            if   rssi >= -50: q = "sehr gut"
-            elif rssi >= -60: q = "gut"
-            elif rssi >= -70: q = "ausreichend"
-            elif rssi >= -80: q = "schwach"
-            else:             q = "kritisch"
+            if rssi >= -50:
+                q = "sehr gut"
+            elif rssi >= -60:
+                q = "gut"
+            elif rssi >= -70:
+                q = "ausreichend"
+            elif rssi >= -80:
+                q = "schwach"
+            else:
+                q = "kritisch"
             rssi_text = f"{rssi} dBm ({q})"
         cards.append(_info_table("Netzwerk", [
             ("IP-Adresse",    net.get("ip_address")),
@@ -2445,8 +2597,10 @@ def build_info_panel() -> str:
             hw = ver.get(f"hw_{mod}")
             if sw or hw:
                 parts = []
-                if sw: parts.append(f"SW {sw}")
-                if hw: parts.append(f"HW {hw}")
+                if sw:
+                    parts.append(f"SW {sw}")
+                if hw:
+                    parts.append(f"HW {hw}")
                 fw_rows.append((label, " &middot; ".join(parts)))
         cards.append(_info_table("Firmware & Hardware", fw_rows))
     else:
@@ -2795,7 +2949,6 @@ def _cable_recommendation(cable: pd.DataFrame, adapter_max_a: float | None) -> s
                 "Einschaetzung stehen.</i></p>")
 
     i_max = float(cable["i_max"].quantile(0.95))   # robust: 95%-Percentil
-    t_max = float(cable["t_max"].quantile(0.95))
     t_med_at_max = float(
         cable.loc[cable["i_max"] >= (i_max - 1.0), "t_max"].median()
     )
@@ -2816,20 +2969,24 @@ def _cable_recommendation(cable: pd.DataFrame, adapter_max_a: float | None) -> s
     t_warm  = float(_cfg_get("thresholds.temperature_warm",     60.0))
     t_hot   = float(_cfg_get("thresholds.temperature_hot",      75.0))
     if t_peak < t_cool:
-        color = "#2ca02c"; label = "unkritisch"
+        color = "#2ca02c"
+        label = "unkritisch"
         hint = ("Du hast deutlich Reserve. Ein etwas hoeheres Limit "
                 "waere wahrscheinlich unproblematisch - wenn dein Adapter das zulaesst. ")
     elif t_peak < t_warm:
-        color = "#ff7f0e"; label = "beobachtbar"
+        color = "#ff7f0e"
+        label = "beobachtbar"
         hint = (f"Moderate Erwaermung. Du liegst noch weit von typischen "
                 f"Abschaltschwellen (~{t_hot:.0f}-{t_hot+10:.0f} °C), aber eine "
                 f"Erhoehung des Stroms wuerde die Temperatur deutlich steigern. ")
     elif t_peak < t_hot:
-        color = "#d62728"; label = "grenzwertig"
+        color = "#d62728"
+        label = "grenzwertig"
         hint = ("Deutliche Erwaermung, naehert sich Derating-Bereichen. "
                 "Ein niedrigeres Limit (1-2 A weniger) koennte das Kabel schonen. ")
     else:
-        color = "#7c1a1a"; label = "kritisch"
+        color = "#7c1a1a"
+        label = "kritisch"
         hint = ("Temperatur bereits im kritischen Bereich - Derating ist wahrscheinlich. "
                 "Strom-Limit reduzieren oder fuer bessere Belueftung sorgen. ")
 
@@ -2903,9 +3060,12 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
     fig_socket  = fig_cable_socket_scatter(cable)
     fig_box     = fig_cable_boxplot(cable)
 
-    if fig_scatter: plots_out["plot-cable-scatter"] = fig_scatter
-    if fig_socket:  plots_out["plot-cable-socket"]  = fig_socket
-    if fig_box:     plots_out["plot-cable-box"]     = fig_box
+    if fig_scatter:
+        plots_out["plot-cable-scatter"] = fig_scatter
+    if fig_socket:
+        plots_out["plot-cable-socket"] = fig_socket
+    if fig_box:
+        plots_out["plot-cable-box"] = fig_box
 
     cable_views: list[str] = []
     if fig_scatter:
@@ -3365,7 +3525,7 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     """Erzeugt tabs_html, sections_html, plots-dict (JSON-serialisierbar)
     und das sessions-DataFrame."""
     sess_df = display_sessions(df)
-    current_df = find_current_session(df)
+    current_df, start_from_counter = find_current_session(df)
 
     # alle Plots vorausbauen (werden per JS gerendert, Panels sind schon im DOM)
     plots: dict[str, dict] = {}
@@ -3375,17 +3535,26 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     energy_fig, _daily = fig_energy_per_day(df)
     heatmap_fig   = fig_power_heatmap(df)
 
-    if temps_fig:     plots["plot-temps"]     = temps_fig
-    if temps_all_fig: plots["plot-temps-all"] = temps_all_fig
-    if power_fig:     plots["plot-power"]     = power_fig
-    if energy_fig:    plots["plot-energy"]    = energy_fig
-    if heatmap_fig:   plots["plot-heatmap"]   = heatmap_fig
+    if temps_fig:
+        plots["plot-temps"] = temps_fig
+    if temps_all_fig:
+        plots["plot-temps-all"] = temps_all_fig
+    if power_fig:
+        plots["plot-power"] = power_fig
+    if energy_fig:
+        plots["plot-energy"] = energy_fig
+    if heatmap_fig:
+        plots["plot-heatmap"] = heatmap_fig
 
     # Dashboard-Klone (eigene IDs, damit jede Seite ihren eigenen Plot-Container hat)
-    if temps_fig:   plots["plot-dash-temps"]   = temps_fig
-    if power_fig:   plots["plot-dash-power"]   = power_fig
-    if energy_fig:  plots["plot-dash-energy"]  = energy_fig
-    if heatmap_fig: plots["plot-dash-heatmap"] = heatmap_fig
+    if temps_fig:
+        plots["plot-dash-temps"] = temps_fig
+    if power_fig:
+        plots["plot-dash-power"] = power_fig
+    if energy_fig:
+        plots["plot-dash-energy"] = energy_fig
+    if heatmap_fig:
+        plots["plot-dash-heatmap"] = heatmap_fig
 
     # --- Panels ---------------------------------------------------------
     last_button_hint = "Alles" if REPORT_RANGE_NAME == "all" else "Zeitraum"
@@ -3437,18 +3606,7 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
         f'<h2>Ladesitzungen</h2>{sessions_table_html(sess_df)}</section>'
     )
 
-    # Erkenne ob Startzeitpunkt geschätzt oder ungewiss ist
-    start_known = not (current_df.empty or 
-                       pd.to_numeric(current_df.get("vehicle_connect_time",[]), errors="coerce").fillna(0).max() <= 0)
-    
-    if _logger_was_inactive_before_first_charging(df):
-        start_estimated_val = False  # Unbekannt
-    elif not start_known:
-        start_estimated_val = True   # Geschätzt
-    else:
-        start_estimated_val = None   # Exakt
-    
-    panel_current = current_session_html(current_df, plots, start_estimated_val)
+    panel_current = current_session_html(current_df, plots, start_from_counter=start_from_counter)
     panel_analysis = build_analysis_section(df, plots)
     panel_events   = build_events_panel(df, plots)
     panel_info     = build_info_panel()
@@ -3456,10 +3614,14 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
 
     # Dashboard mit Grid
     dash_tiles: list[str] = []
-    if "plot-dash-temps"   in plots: dash_tiles.append(_plot_div("plot-dash-temps",   "Temperaturen"))
-    if "plot-dash-power"   in plots: dash_tiles.append(_plot_div("plot-dash-power",   "Leistung & Strom"))
-    if "plot-dash-energy"  in plots: dash_tiles.append(_plot_div("plot-dash-energy",  "Lademenge je Tag"))
-    if "plot-dash-heatmap" in plots: dash_tiles.append(_plot_div("plot-dash-heatmap", "Ladeaktivitaet nach Tag & Stunde", wrap_class="dash-full"))
+    if "plot-dash-temps" in plots:
+        dash_tiles.append(_plot_div("plot-dash-temps", "Temperaturen"))
+    if "plot-dash-power" in plots:
+        dash_tiles.append(_plot_div("plot-dash-power", "Leistung & Strom"))
+    if "plot-dash-energy" in plots:
+        dash_tiles.append(_plot_div("plot-dash-energy", "Lademenge je Tag"))
+    if "plot-dash-heatmap" in plots:
+        dash_tiles.append(_plot_div("plot-dash-heatmap", "Ladeaktivitaet nach Tag & Stunde", wrap_class="dash-full"))
     dash_body = "".join(dash_tiles) if dash_tiles else "<p><i>Keine Daten im Zeitraum.</i></p>"
 
     # Teaser fuer aktuelle Session oben im Dashboard
@@ -3468,8 +3630,8 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
         items = current_session_kpis(current_df)
         if items:
             chips = "".join(
-                f'<div class="kpi"><div class="v">{v}</div><div class="l">{l}</div></div>'
-                for v, l in items[:5]
+                f'<div class="kpi"><div class="v">{value}</div><div class="l">{label}</div></div>'
+                for value, label in items[:5]
             )
             limit_bar = _energy_limit_progress_html(current_df)
             current_teaser = (

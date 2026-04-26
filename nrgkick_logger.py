@@ -22,7 +22,6 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Iterator
 
 import requests
@@ -33,7 +32,6 @@ from nrgkick_config import (
     load_config as _load_cfg,
     db_path  as _db_path,
     log_path as _log_path,
-    data_dir_from,
 )
 
 

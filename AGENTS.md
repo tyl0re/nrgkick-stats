@@ -14,7 +14,7 @@ Windows-Logger + HTML-Analyse für **NRGkick Gen2**-Wallboxen. Python 3.10+, SQL
 
 **Datenbank:** `%LOCALAPPDATA%\NRGkickLogger\nrgkick.db`  
 **Config:** `%LOCALAPPDATA%\NRGkickLogger\config.json`  
-**Reports:** `%LOCALAPPTAITATA%\NRGkickLogger\reports\latest.html`
+**Reports:** `%LOCALAPPDATA%\NRGkickLogger\reports\latest.html`
 
 ## Wichtige Commands (nicht raten!)
 
@@ -61,7 +61,7 @@ SELECT DISTINCT path FROM samples_kv ORDER BY path;
 
 - **Startzeitpunkt:** Erster `CHARGING` im Log oder `energy_session_wh`-Reset
 - **Grenzen:** Lücken > 15 Min trennen Sessions (`thresholds.session_gap_minutes`)
-- **Problem:** Wenn Logger inaktiv war, fehlt der exakte Start – Code sucht nach Energie-Sprüngen
+- **Problem:** Wenn Logger inaktiv war, fehlt der erste Messpunkt – Reports rechnen den Einsteckzeitpunkt aus `vehicle_connect_time` zurueck
 
 ## Typische Fehlerquellen
 

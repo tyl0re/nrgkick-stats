@@ -148,7 +148,9 @@ Beispielkonfiguration mit Erklärungen findest du in
 | `thresholds.standby_power_w` | `50.0` | unter diesem Wert: kein Laden |
 | `thresholds.temperature_warm/hot` | `60 / 75` | Schwellwerte für Ampel |
 | `derating.min_delta_a` | `1.0` | Schwellwert-Stromänderung für Event-Erkennung |
-| `report.default_range` | `24h` | Zeitraum beim Stats-Aufruf |
+| `costs.electricity_price_eur_per_kwh` | `null` | optionaler Strompreis fuer Kostenschaetzung |
+| `costs.co2_g_per_kwh` | `null` | optionaler CO2-Faktor fuer CO2-Schaetzung |
+| `report.default_range` | `all` | Zeitraum beim Stats-Aufruf |
 | `report.auto_open` | `true` | Browser nach Report-Erstellung öffnen |
 | `ui.heatmap_colorscale` | blau→grün→rot | Farbskala für Heatmap |
 | `service.service_name` | `NRGkickLogger` | Name des Windows-Dienstes |

@@ -71,6 +71,10 @@ DEFAULTS: dict[str, Any] = {
         "temp_quantile":         0.75,   # Schwelle = Session-Quantil
         "recovery_cooldown_c":   3.0,    # °C unter Derating-Peak = Recovery
     },
+    "costs": {
+        "electricity_price_eur_per_kwh": None,  # z.B. 0.35 fuer Kostenschaetzung
+        "co2_g_per_kwh":                 None,  # z.B. 380 fuer CO2-Schaetzung
+    },
     "report": {
         "default_range":   "all",        # today | 24h | 7d | 30d | all
         "default_tab":     "dashboard",

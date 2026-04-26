@@ -50,6 +50,12 @@
     "recovery_cooldown_c": 3.0
   },
 
+  "costs": {
+    "_help": "Optionale Schaetzwerte fuer Report-Kosten und CO2. null = nicht anzeigen.",
+    "electricity_price_eur_per_kwh": 0.265,
+    "co2_g_per_kwh": null
+  },
+
   "report": {
     "_help": "Default-Verhalten des Stats-Tools. Commandline-Flags uebersteuern.",
     "default_range": "all",
