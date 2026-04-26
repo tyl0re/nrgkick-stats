@@ -509,19 +509,19 @@ def fig_power_heatmap(df: pd.DataFrame) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
-    """Erkennt zusammenhaengende CHARGING-Phasen.
-    Eine Luecke im Sample-Index wird erst dann als Session-Ende gewertet,
-    wenn sie deutlich laenger ist als das normale Polling-Intervall
-    (Median der Sample-Abstaende x 3, mindestens aber 15 min)."""
+    """Erkennt zusammenhaengende CHARGING-Phasen und versucht, Session-Startpunkte
+    ueber energy_session_wh-Spruenge zu detektieren (wenn Logger nicht lueckenlos war).
+
+    Returns:
+        DataFrame mit is_charging-Spalte und session_id.
+    """
     if df.empty or "charging_state" not in df.columns:
-        return pd.DataFrame()
+        return df.assign(is_charging=0, session_id=-1)
+
     s = df.copy()
     s["is_charging"] = (s["charging_state"] == "CHARGING").astype(int)
 
-    # Adaptive Luecken-Schwelle: Median der Sample-Abstaende x 3, mindestens
-    # aber der konfigurierte Wert (default 15 min).
-    diffs = s.index.to_series().diff().dt.total_seconds().dropna()
-    median_dt = float(diffs.median()) if not diffs.empty else 60.0
+    # Session-Grenzen detektieren durch Luecken > X Minuten
     min_gap_s = float(_cfg_get("thresholds.session_gap_minutes", 15.0)) * 60.0
     gap_threshold = max(median_dt * 3.0, min_gap_s)
 
@@ -529,6 +529,16 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
     gap_break = (dt > gap_threshold).astype(int)
     state_change = (s["is_charging"].diff().abs().fillna(1) > 0).astype(int)
     s["group"] = (state_change | gap_break).cumsum()
+
+    # Energie-Spruenge suchen (wenn energy_session_wh zurueckgesetzt wurde)
+    if "energy_session_wh" in s.columns:
+        e = pd.to_numeric(s["energy_session_wh"], errors="coerce")
+        gap = e.diff()
+        large_drop = gap < -50  # Groesser als -50 Wh Sprung (Reset)
+        reset_idxs = s.index[large_drop].tolist()
+
+        if len(reset_idxs) > 1:
+            log.info("energy_session_wh Resets gefunden bei %d Zeitpunkten", len(reset_idxs))
 
     sessions = []
     for _gid, grp in s.groupby("group"):
@@ -558,14 +568,26 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
             es = pd.to_numeric(grp["energy_session_wh"], errors="coerce").dropna()
             if not es.empty:
                 energy_session_start = float(es.iloc[0])
-                energy_session_end = float(es.iloc[-1])
-        energy_total_start = None
-        energy_total_end = None
-        if "energy_total_wh" in grp and grp["energy_total_wh"].notna().any():
-            et = pd.to_numeric(grp["energy_total_wh"], errors="coerce").dropna()
-            if not et.empty:
-                energy_total_start = float(et.iloc[0])
-                energy_total_end = float(et.iloc[-1])
+                energy_session_end   = float(es.iloc[-1])
+
+        # Wenn der Gruppe-Start nicht dem ersten Reset folgt, versuche den Start ueber Resets zu finden
+        actual_start = start
+        if "energy_session_wh" in grp and len(grp) > 1:
+            try:
+                e_grp = pd.to_numeric(grp["energy_session_wh"], errors="coerce")
+                # Suche Reset-Punkte innerhalb dieser Gruppe (groesse Sprung nach unten)
+                drops = []
+                for i in range(1, len(e_grp)):
+                    if e_grp.iloc[i] < e_grp.iloc[i-1] - 50:
+                        drops.append(grp.index[i])
+
+                # Wenn es einen Reset gibt, ist der Start danach
+                if len(drops) > 0 and drops[0] > start:
+                    actual_start = drops[0]
+                    log.info("Session %d Start ueber energy_reset von %s auf %s", _gid, start, actual_start)
+            except Exception as e:
+                log.debug("Failed to detect session start via reset: %s", e)
+
         sessions.append({
             "start":       start,
             "ende":        end,
@@ -578,6 +600,7 @@ def detect_sessions(df: pd.DataFrame) -> pd.DataFrame:
             "_es_end":     energy_session_end,
             "_et_start":   energy_total_start,
             "_et_end":     energy_total_end,
+            "_start_est":  actual_start,
         })
 
     merged: list[dict] = []
@@ -814,6 +837,30 @@ def _fmt_duration(seconds: float) -> str:
     if h > 0:
         return f"{h}h {m:02d}m"
     return f"{m}m"
+
+
+def _logger_was_inactive_before_first_charging(df: pd.DataFrame) -> bool:
+    """Prueft ob Logger inaktiv war vor dem ersten CHARGING im Log.
+    
+    Wenn der erste CHARGING-Punkt > 1 Std nach dem ersten DB-Eintrag liegt,
+    geht man davon aus, dass das Auto schon eingesteckt war als Logger startete.
+    """
+    if df.empty or len(df) < 2:
+        return False
+    
+    # Erster und letzter Timestamp in der gesamten DB (lokal)
+    first_ts = df.index[0]
+    
+    # Erster CHARGING-Punkt
+    charging_mask = df.get("charging_state") == "CHARGING" if "charging_state" in df.columns else pd.Series(False, index=df.index)
+    if not charging_mask.any():
+        return False
+    
+    first_charging_ts = df[charging_mask].index[0]
+    
+    # Wenn > 1 Std Dazwischen, war Logger wahrscheinlich inaktiv
+    gap_hours = (first_charging_ts - first_ts).total_seconds() / 3600.0
+    return gap_hours > 1.0
 
 
 def current_session_kpis(sess_df: pd.DataFrame) -> list[tuple[str, str]]:
@@ -1065,9 +1112,15 @@ def _energy_limit_progress_html(sess_df: pd.DataFrame) -> str:
 
 
 def current_session_html(sess_df: pd.DataFrame,
-                         plots_out: dict) -> str:
+                         plots_out: dict,
+                         start_estimated: bool | None = None) -> str:
     """Baut den kompletten Panel-Inhalt fuer den 'current'-Tab
-    und registriert die zugehoerigen Plot-Specs in plots_out."""
+    und registriert die zugehoerigen Plot-Specs in plots_out.
+    
+    start_estimated=True  -> Start wurde per Energie/Sprung geschätzt
+    start_estimated=False -> Start ist ungewiss (Logger war inaktiv)
+    start_estimated=None  -> Exakter Start bekannt
+    """
     if sess_df.empty:
         return ('<section class="panel" id="panel-current">'
                 '<h2>Aktuelle Session</h2>'
@@ -1109,8 +1162,18 @@ def current_session_html(sess_df: pd.DataFrame,
 
     start_str = sess_df.index[0].strftime("%Y-%m-%d %H:%M")
     end_str   = sess_df.index[-1].strftime("%Y-%m-%d %H:%M")
-    head = (f'<p class="sub">angesteckt seit <b>{start_str}</b> &middot; '
-            f'Stand <b>{end_str}</b> &middot; {len(sess_df)} Messpunkte</p>')
+    # Klar kommunizieren, wenn Startzeitpunkt ungewiss ist
+    if start_estimated is False:
+        head = (f'<p class="sub">angesteckt seit <b>{start_str}</b> '
+                f'(Logger war inaktiv - exakter Start unbekannt) &middot; '
+                f'Stand <b>{end_str}</b> &middot; {len(sess_df)} Messpunkte</p>')
+    elif start_estimated is True:
+        head = (f'<p class="sub">angesteckt seit <b>{start_str}</b>'
+                f' (geschaezt) &middot; Stand <b>{end_str}</b> '
+                f'&middot; {len(sess_df)} Messpunkte</p>')
+    else:
+        head = (f'<p class="sub">angesteckt seit <b>{start_str}</b> &middot; '
+                f'Stand <b>{end_str}</b> &middot; {len(sess_df)} Messpunkte</p>')
     hint = ('<p class="hint">Bereich mit der Maus aufziehen = hineinzoomen '
             '&middot; Doppelklick = Reset &middot; '
             'Legenden-Eintraege toggeln Serien.</p>')
@@ -1647,6 +1710,26 @@ def session_label(start: pd.Timestamp, end: pd.Timestamp, n_samples: int) -> str
     return f"{start_cmp.strftime('%a %d.%m. %H:%M')} ({dur_min:.0f} min)"
 
 
+def session_label_with_est(start: pd.Timestamp, est_start: pd.Timestamp | None, end: pd.Timestamp, n_samples: int) -> str:
+    """Label mit geschaeztem Start, falls vorhanden."""
+    now = pd.Timestamp.now(tz=_report_tzinfo())
+    if est_start is not None:
+        est_cmp = est_start if est_start.tzinfo is not None else est_start.tz_localize(_report_tzinfo())
+        start_cmp = start if start.tzinfo is not None else start.tz_localize(_report_tzinfo())
+        end_cmp   = end if end.tzinfo is not None else end.tz_localize(_report_tzinfo())
+        # Wenn geschaezter Start vor dem offiziellen Start liegt, zeige beide an
+        if est_cmp < start_cmp:
+            dur_min = (end_cmp - est_cmp).total_seconds() / 60.0
+            same_day = est_cmp.normalize() == now.normalize()
+            if same_day and (now - end_cmp).total_seconds() < 600:
+                return f"Aktuell (geschaezt seit {est_cmp.strftime('%H:%M')}, {dur_min:.0f} min)"
+            if same_day:
+                return f"Heute {est_cmp.strftime('%H:%M')} - {end_cmp.strftime('%H:%M')} ({dur_min:.0f} min)"
+            return f"{est_cmp.strftime('%a %d.%m. %H:%M')} - {end_cmp.strftime('%H:%M')} ({dur_min:.0f} min)"
+
+    return session_label(start, end, n_samples)
+
+
 def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     """Erzeugt die Ladevorgang-Analyse. Pro Session werden alle Plots und
     Tabellen erzeugt; per JS-Dropdown wird nur einer sichtbar gemacht."""
@@ -1669,7 +1752,16 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
     for idx, (start, end, sub) in enumerate(blocks):
         events = detect_derating_events(sub)
         agg = session_aggregates(sub, events)
-        agg["_label"] = session_label(start, end, len(sub))
+        
+        # Kennzeichnen ob Start geschätzt oder ungewiss ist
+        start_known = not pd.to_numeric(sub.get("vehicle_connect_time",[]), errors="coerce").fillna(0).max() <= 0
+        
+        if _logger_was_inactive_before_first_charging(sub):
+            agg["_label"] = f"{session_label(start, end, len(sub))} (Logger inaktiv - Start unbekannt)"
+        elif not start_known:
+            agg["_label"] = f"{session_label(start, end, len(sub))} (geschätzt)"
+        else:
+            agg["_label"] = session_label(start, end, len(sub))
         agg_rows.append(agg)
 
         sid = f"an-{idx}"
@@ -3345,7 +3437,18 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
         f'<h2>Ladesitzungen</h2>{sessions_table_html(sess_df)}</section>'
     )
 
-    panel_current  = current_session_html(current_df, plots)
+    # Erkenne ob Startzeitpunkt geschätzt oder ungewiss ist
+    start_known = not (current_df.empty or 
+                       pd.to_numeric(current_df.get("vehicle_connect_time",[]), errors="coerce").fillna(0).max() <= 0)
+    
+    if _logger_was_inactive_before_first_charging(df):
+        start_estimated_val = False  # Unbekannt
+    elif not start_known:
+        start_estimated_val = True   # Geschätzt
+    else:
+        start_estimated_val = None   # Exakt
+    
+    panel_current = current_session_html(current_df, plots, start_estimated_val)
     panel_analysis = build_analysis_section(df, plots)
     panel_events   = build_events_panel(df, plots)
     panel_info     = build_info_panel()
