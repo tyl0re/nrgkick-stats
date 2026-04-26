@@ -33,3 +33,5 @@ _dev/
 _*.py
 _*.bat
 requirements-dev.txt
+AGENTS.md
+agent.md
