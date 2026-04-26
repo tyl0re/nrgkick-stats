@@ -1448,9 +1448,15 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
     else:
         out["angesteckt_min"] = (sess.index[-1] - sess.index[0]).total_seconds() / 60.0
 
-    if "vehicle_charging_time" in sess and sess["vehicle_charging_time"].notna().any():
-        out["aktiv_min"] = float(pd.to_numeric(
-            sess["vehicle_charging_time"], errors="coerce").dropna().iloc[-1]) / 60.0
+    # Robust: compute total charging time by summing per-row durations during CHARGING
+    if "charging_state" in sess.columns and sess["charging_state"].notna().any():
+        dt = sess.index.to_series().diff().dt.total_seconds().fillna(0.0)
+        ch_mask = sess["charging_state"] == "CHARGING"
+        if ch_mask.any():
+            charging_time_sec = float(dt[ch_mask].sum())
+            out["aktiv_min"] = charging_time_sec / 60.0
+        else:
+            out["aktiv_min"] = 0.0
     else:
         out["aktiv_min"] = float((sess["charging_state"] == "CHARGING").sum())  # 1/min
 
