@@ -11,7 +11,7 @@ Alle Grafiken sind **interaktiv** (Plotly):
   - Zeit-Shortcuts (1h / 6h / 24h / 7d / Alles) im Zeitreihen-Plot
 
 Aufrufe:
-    python nrgkick_stats.py                            # 24h, Default-Tab Dashboard
+    python nrgkick_stats.py                            # all, Default-Tab Dashboard
     python nrgkick_stats.py --range 7d --default temps --open
     python nrgkick_stats.py --range all --open
 """
@@ -31,6 +31,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
+import requests
+from requests.auth import HTTPBasicAuth
 
 
 from nrgkick_config import (
@@ -47,7 +49,7 @@ log = logging.getLogger(__name__)
 # Wird in main() mit der konkreten Config gefuellt, damit Hilfsfunktionen
 # weiterhin Zugriff haben, ohne die Signatur ueberall aendern zu muessen.
 CFG: dict = {}
-REPORT_RANGE_NAME = "24h"
+REPORT_RANGE_NAME = "all"
 
 
 def _cfg_get(path: str, default=None):
@@ -135,6 +137,7 @@ def load_samples(start: datetime | None, end: datetime) -> pd.DataFrame:
     # Direkte ts_local-Parse scheitert bei gemischten Offsets (+01/+02).
     df["ts_local_dt"] = pd.to_datetime(df["ts_utc"], utc=True).dt.tz_convert(_report_tzinfo())
     df = df.set_index("ts_local_dt").sort_index()
+    df = _augment_general_fields_from_raw(df)
     return df
 
 
@@ -805,6 +808,40 @@ def _augment_connect_time_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _augment_general_fields_from_raw(df: pd.DataFrame) -> pd.DataFrame:
+    """Fuellt seltenere general.* Felder aus raw_values_json fuer Reports."""
+    if df.empty or "raw_values_json" not in df.columns:
+        return df
+    fields = {
+        "rcd_trigger": "rcd_trigger",
+        "charge_count": "charge_count",
+    }
+    needed = [col for col in fields if col not in df.columns or not df[col].notna().any()]
+    if not needed:
+        return df
+    out = df.copy()
+
+    def _general_from_raw(raw: object) -> dict:
+        if not isinstance(raw, str):
+            return {}
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}
+        general = data.get("general")
+        return general if isinstance(general, dict) else {}
+
+    general_values = out["raw_values_json"].apply(_general_from_raw)
+    for col in needed:
+        raw_key = fields[col]
+        if col not in out.columns:
+            out[col] = None
+        missing = out[col].isna()
+        if missing.any():
+            out.loc[missing, col] = general_values.loc[missing].apply(lambda g: g.get(raw_key))
+    return out
+
+
 def _session_reset_breaks(df: pd.DataFrame) -> pd.Series:
     """True at rows where Wallbox session counters clearly restarted."""
     breaks = pd.Series(False, index=df.index)
@@ -1250,16 +1287,56 @@ def _energy_limit_progress_html(sess_df: pd.DataFrame) -> str:
     )
 
 
+def _latest_float(df: pd.DataFrame, col: str) -> float | None:
+    if col not in df.columns or not df[col].notna().any():
+        return None
+    values = pd.to_numeric(df[col], errors="coerce").dropna()
+    return float(values.iloc[-1]) if not values.empty else None
+
+
+def _probe_phase_switch_enabled(phase_count: int | None) -> tuple[bool, str]:
+    if phase_count is None:
+        return False, "Phasenumschaltung konnte nicht geprueft werden: kein aktueller phase_count."
+    host = _cfg_get("connection.host", "")
+    if not host:
+        return False, "Keine Wallbox-IP in connection.host konfiguriert."
+    conn = _cfg_get("connection", {}) or {}
+    scheme = "https" if conn.get("use_https") else "http"
+    auth = None
+    if conn.get("username"):
+        auth = HTTPBasicAuth(conn["username"], conn.get("password", ""))
+    try:
+        response = requests.get(
+            f"{scheme}://{host}/control",
+            params={"phase_count": phase_count},
+            auth=auth,
+            timeout=float(conn.get("http_timeout", 10)),
+            verify=bool(conn.get("verify_tls", True)),
+        )
+    except Exception as exc:
+        return False, f"Phasenumschaltung konnte nicht geprueft werden: {exc}"
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    message = str(data.get("Response") or response.text or "").strip()
+    if response.status_code == 200:
+        return True, "Phasenumschaltung ist aktiviert."
+    if message:
+        return False, message
+    return False, f"Phasenumschaltung nicht verfuegbar (HTTP {response.status_code})."
+
+
 def _settings_panel_html(df: pd.DataFrame) -> str:
     host = _cfg_get("connection.host", "")
     scheme = "https" if _cfg_get("connection.use_https", False) else "http"
     action = html.escape(f"{scheme}://{host}/control", quote=True)
 
-    current_a = None
-    if "set_current_a" in df.columns and df["set_current_a"].notna().any():
-        set_a = pd.to_numeric(df["set_current_a"], errors="coerce").dropna()
-        if not set_a.empty:
-            current_a = float(set_a.iloc[-1])
+    current_a = _latest_float(df, "set_current_a")
+    charge_pause = _latest_float(df, "charge_pause")
+    phase_count_f = _latest_float(df, "phase_count")
+    phase_count = int(phase_count_f) if phase_count_f is not None else None
 
     energy_limit_kwh = None
     if "energy_limit_wh" in df.columns and df["energy_limit_wh"].notna().any():
@@ -1270,10 +1347,26 @@ def _settings_panel_html(df: pd.DataFrame) -> str:
     current_value = f' value="{current_a:.1f}"' if current_a is not None else ""
     limit_value = f' value="{energy_limit_kwh:.1f}"' if energy_limit_kwh is not None else ' value="0.0"'
     current_hint = f"Aktuell laut letztem Report: {current_a:.1f} A" if current_a is not None else "Aktueller Ladestrom unbekannt"
+    pause_hint = (
+        "Aktuell: pausiert" if charge_pause == 1
+        else "Aktuell: freigegeben" if charge_pause == 0
+        else "Aktueller Pausenstatus unbekannt"
+    )
     limit_hint = (
         f"Aktuelles Energy-Limit: {energy_limit_kwh:.1f} kWh"
         if energy_limit_kwh is not None and energy_limit_kwh > 0
         else "Aktuelles Energy-Limit: aus"
+    )
+    phase_enabled, phase_message = _probe_phase_switch_enabled(phase_count)
+    phase_hint = (
+        f"Aktuell: {phase_count} Phase{'' if phase_count == 1 else 'n'}"
+        if phase_count is not None else "Aktuelle Phasenanzahl unbekannt"
+    )
+    phase_disabled = "" if phase_enabled else " disabled"
+    phase_card_class = "control-card" if phase_enabled else "control-card disabled"
+    phase_options = "".join(
+        f'<option value="{value}"{ " selected" if phase_count == value else ""}>{label}</option>'
+        for value, label in ((1, "1 Phase (1-phasig)"), (3, "3 Phasen (L1/L2/L3)"))
     )
 
     if not host:
@@ -1307,6 +1400,32 @@ def _settings_panel_html(df: pd.DataFrame) -> str:
             '</form>'
             '<p class="hint"><code>0</code> schaltet das Limit aus. Die Anzeige ist kWh; '
             'gesendet wird an die API als Wh: <code>/control?energy_limit=...</code>.</p>'
+            '</div>'
+            '<div class="control-card">'
+            '<div class="control-head"><b>Laden pausieren</b>'
+            f'<span>{html.escape(pause_hint)}</span></div>'
+            '<form class="control-form" method="get" target="nrgkick-control-frame" '
+            f'action="{action}" onsubmit="return submitPauseControl(this, event)">'
+            '<button type="submit" name="charge_pause" value="1">Pause</button>'
+            '<button type="submit" name="charge_pause" value="0">Fortsetzen</button>'
+            '<span class="control-status" aria-live="polite"></span>'
+            '</form>'
+            '<p class="hint">Sendet <code>/control?charge_pause=1</code> oder '
+            '<code>/control?charge_pause=0</code>.</p>'
+            '</div>'
+            f'<div class="{phase_card_class}">'
+            '<div class="control-head"><b>Phasenumschaltung</b>'
+            f'<span>{html.escape(phase_hint)}</span></div>'
+            '<p class="danger-hint"><b>Achtung:</b> Phasenumschaltung kann potentiell gefaehrlich sein. '
+            'Nur umschalten, wenn Fahrzeug, Installation und NRGkick-Freigabe dafuer geeignet sind.</p>'
+            '<form class="control-form" method="get" target="nrgkick-control-frame" '
+            f'action="{action}" onsubmit="return submitPhaseControl(this)">'
+            '<label for="phase-count">Auswahl</label>'
+            f'<select id="phase-count" name="phase_count"{phase_disabled}>{phase_options}</select>'
+            f'<button type="submit"{phase_disabled}>Senden</button>'
+            '<span class="control-status" aria-live="polite"></span>'
+            '</form>'
+            f'<p class="hint">{html.escape(phase_message)}</p>'
             '</div>'
             '</div>'
             '<iframe name="nrgkick-control-frame" class="control-frame" title="NRGkick Control"></iframe>'
@@ -2234,6 +2353,7 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
 # ---------------------------------------------------------------------------
 
 NORMAL_CODES = {"NO_ERROR", "NO_WARNING", None, ""}
+NORMAL_RCD_CODES = {"NO_FAULT", "NO_TRIGGER", "NO_RCD_TRIGGER", "0", None, ""}
 
 
 def _episodes_from_series(s: pd.Series) -> list[dict]:
@@ -2269,12 +2389,15 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
     # ---- Errors & Warnings ---------------------------------------------
     err_series = df["error_code"]   if "error_code"   in df.columns else pd.Series(dtype=object)
     warn_series = df["warning_code"] if "warning_code" in df.columns else pd.Series(dtype=object)
+    rcd_series = df["rcd_trigger"] if "rcd_trigger" in df.columns else pd.Series(dtype=object)
 
     err_eps  = _episodes_from_series(err_series)
     warn_eps = _episodes_from_series(warn_series)
+    rcd_eps = _episodes_from_series(rcd_series)
 
     def _agg(eps: list[dict], kind: str) -> pd.DataFrame:
-        rows = [e for e in eps if e["code"] not in NORMAL_CODES]
+        normal_codes = NORMAL_RCD_CODES if kind == "rcd" else NORMAL_CODES
+        rows = [e for e in eps if e["code"] not in normal_codes]
         if not rows:
             return pd.DataFrame()
         agg: dict[str, dict] = {}
@@ -2296,6 +2419,7 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
     err_df  = _agg(err_eps, "error")
     warn_df = _agg(warn_eps, "warning")
+    rcd_df = _agg(rcd_eps, "rcd")
 
     def _fmt_ts(t: pd.Timestamp) -> str:
         try:
@@ -2305,11 +2429,10 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
     def _render_table(df: pd.DataFrame, kind: str) -> str:
         if df.empty:
-            return ('<p><i>Keine '
-                    + ('Fehler' if kind == 'error' else 'Warnungen')
-                    + ' im Zeitraum aufgetreten.</i></p>')
+            label = {"error": "Fehler", "warning": "Warnungen", "rcd": "RCD/FI-Ausloesungen"}.get(kind, kind)
+            return f'<p><i>Keine {label} im Zeitraum aufgetreten.</i></p>'
         rows = []
-        sev_class = "sev-error" if kind == "error" else "sev-warn"
+        sev_class = "sev-error" if kind in {"error", "rcd"} else "sev-warn"
         for _, r in df.iterrows():
             rows.append(
                 f'<tr>'
@@ -2333,10 +2456,35 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
     err_table  = _render_table(err_df,  "error")
     warn_table = _render_table(warn_df, "warning")
+    rcd_table = _render_table(rcd_df, "rcd")
+
+    def _render_rcd_history(eps: list[dict]) -> str:
+        if not eps:
+            return ""
+        rows = []
+        for ep in eps:
+            code = ep["code"]
+            cls = "sev-ok" if code in NORMAL_RCD_CODES else "sev-error"
+            rows.append(
+                f'<tr><td class="code {cls}">{code or "-"}</td>'
+                f'<td>{_decode_code(code, "rcd") if code else "-"}</td>'
+                f'<td>{_fmt_duration(ep["dauer_min"] * 60)}</td>'
+                f'<td>{_fmt_ts(ep["start"])}</td>'
+                f'<td>{_fmt_ts(ep["ende"])}</td>'
+                f'<td>{int(ep["samples"])}</td></tr>'
+            )
+        return (
+            '<h4>RCD/FI-Historie</h4>'
+            '<table class="events"><thead><tr>'
+            '<th>Status</th><th>Bedeutung</th><th>Dauer</th>'
+            '<th>von</th><th>bis</th><th>Samples</th>'
+            '</tr></thead><tbody>' + "".join(rows) + '</tbody></table>'
+        )
 
     # ---- Timeline: nur nicht-normale Codes --------------------------
     def _build_timeline(eps: list[dict], kind: str) -> dict | None:
-        non_normal = [e for e in eps if e["code"] not in NORMAL_CODES]
+        normal_codes = NORMAL_RCD_CODES if kind == "rcd" else NORMAL_CODES
+        non_normal = [e for e in eps if e["code"] not in normal_codes]
         if not non_normal:
             return None
         uniq_codes: list[str] = []
@@ -2373,7 +2521,7 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
                 "connectgaps": False,
             })
         layout = {
-            "title": ("Error-Timeline" if kind == "error" else "Warning-Timeline"),
+            "title": {"error": "Error-Timeline", "warning": "Warning-Timeline", "rcd": "RCD/FI-Timeline"}.get(kind, "Timeline"),
             "height": 90 + 40 * len(uniq_codes),
             "margin": {"l": 240, "r": 20, "t": 45, "b": 40},
             "xaxis": {"type": "date", "title": "Zeit"},
@@ -2385,15 +2533,19 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
     err_tl  = _build_timeline(err_eps,  "error")
     warn_tl = _build_timeline(warn_eps, "warning")
+    rcd_tl = _build_timeline(rcd_eps, "rcd")
     if err_tl:
         plots_out["plot-events-errors"] = err_tl
     if warn_tl:
         plots_out["plot-events-warnings"] = warn_tl
+    if rcd_tl:
+        plots_out["plot-events-rcd"] = rcd_tl
 
     # ---- aktueller Zustand ------------------------------------------
     last = df.iloc[-1]
     last_err  = str(last.get("error_code",   "") or "")
     last_warn = str(last.get("warning_code", "") or "")
+    last_rcd = str(last.get("rcd_trigger", "") or "")
     status_bits: list[str] = []
     if last_err and last_err not in NORMAL_CODES:
         status_bits.append(
@@ -2415,23 +2567,37 @@ def build_events_panel(df: pd.DataFrame, plots_out: dict) -> str:
             '<div class="kpi"><div class="v sev-ok">OK</div>'
             '<div class="l">keine aktive Warnung</div></div>'
         )
+    if last_rcd and last_rcd not in NORMAL_RCD_CODES:
+        status_bits.append(
+            f'<div class="kpi"><div class="v sev-error">{last_rcd}</div>'
+            f'<div class="l">aktueller RCD/FI-Status ({_decode_code(last_rcd, "rcd")})</div></div>'
+        )
+    elif last_rcd:
+        status_bits.append(
+            f'<div class="kpi"><div class="v sev-ok">{last_rcd}</div>'
+            '<div class="l">kein RCD/FI-Trigger</div></div>'
+        )
     status_block = '<div class="kpis">' + "".join(status_bits) + '</div>'
 
     tl_html_err  = (_plot_div("plot-events-errors")
                     if err_tl else "")
     tl_html_warn = (_plot_div("plot-events-warnings")
                     if warn_tl else "")
+    tl_html_rcd = (_plot_div("plot-events-rcd")
+                   if rcd_tl else "")
 
     return (
         '<section class="panel" id="panel-events">'
         '<h2>Ereignisse (Fehler &amp; Warnungen)</h2>'
         '<p class="hint">Quelle: Spalten <code>error_code</code> / '
-        '<code>warning_code</code> der samples-Tabelle. '
+        '<code>warning_code</code> der samples-Tabelle sowie '
+        '<code>general.rcd_trigger</code> aus <code>raw_values_json</code>. '
         'Angezeigt werden nur Codes, die im gewaehlten Zeitraum '
         'tatsaechlich aufgetreten sind.</p>'
         + status_block +
         '<h3>Fehler</h3>' + err_table + (tl_html_err if err_tl else "") +
         '<h3>Warnungen</h3>' + warn_table + (tl_html_warn if warn_tl else "") +
+        '<h3>RCD/FI</h3>' + rcd_table + _render_rcd_history(rcd_eps) + (tl_html_rcd if rcd_tl else "") +
         '</section>'
     )
 
@@ -2470,6 +2636,38 @@ def _load_device_info() -> dict | None:
         "hw_version": row[5],
         "raw": raw,
     }
+
+
+def _load_wifi_signal_history() -> pd.DataFrame:
+    if not DB_FILE.exists():
+        return pd.DataFrame()
+    rows: list[dict] = []
+    try:
+        with sqlite3.connect(str(DB_FILE)) as conn:
+            data = conn.execute(
+                "SELECT ts_utc, raw_info_json FROM device_info ORDER BY ts_utc ASC"
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return pd.DataFrame()
+    for ts_utc, raw_json in data:
+        if not raw_json:
+            continue
+        try:
+            raw = json.loads(raw_json)
+        except Exception:
+            continue
+        rssi = _nested_get(raw, "network", "rssi")
+        if rssi in (None, ""):
+            continue
+        try:
+            rows.append({"ts_utc": ts_utc, "rssi": float(rssi)})
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["ts_local_dt"] = pd.to_datetime(df["ts_utc"], utc=True).dt.tz_convert(_report_tzinfo())
+    return df.set_index("ts_local_dt").sort_index()
 
 
 def _db_stats() -> dict:
@@ -2639,6 +2837,54 @@ def _cellular_info(raw: dict) -> dict:
     }
 
 
+def _modem_info(raw: dict) -> dict:
+    return {
+        "model": _first_present(raw, [
+            ("modem", "model"),
+            ("modem", "module"),
+            ("cellular", "modem"),
+            ("mobile", "modem"),
+            ("network", "modem", "model"),
+            ("network", "cellular", "modem"),
+        ]),
+        "manufacturer": _first_present(raw, [
+            ("modem", "manufacturer"),
+            ("modem", "vendor"),
+            ("network", "modem", "manufacturer"),
+        ]),
+        "firmware": _first_present(raw, [
+            ("modem", "firmware"),
+            ("modem", "sw_version"),
+            ("modem", "version"),
+            ("versions", "sw_modem"),
+            ("versions", "sw_mo"),
+            ("network", "modem", "firmware"),
+        ]),
+        "hardware": _first_present(raw, [
+            ("modem", "hardware"),
+            ("modem", "hw_version"),
+            ("versions", "hw_modem"),
+            ("versions", "hw_mo"),
+            ("network", "modem", "hardware"),
+        ]),
+        "imei": _first_present(raw, [
+            ("modem", "imei"),
+            ("cellular", "imei"),
+            ("mobile", "imei"),
+            ("network", "modem", "imei"),
+            ("network", "cellular", "imei"),
+        ]),
+        "iccid": _first_present(raw, [
+            ("modem", "iccid"),
+            ("modem", "sim_iccid"),
+            ("cellular", "iccid"),
+            ("mobile", "iccid"),
+            ("network", "modem", "iccid"),
+            ("network", "cellular", "iccid"),
+        ]),
+    }
+
+
 def _code_table_html(kind: str, rows: list[tuple[str, str, str]]) -> str:
     sev_class_map = {"ok": "sev-ok", "warn": "sev-warn", "error": "sev-error"}
     tr_rows = []
@@ -2655,7 +2901,40 @@ def _code_table_html(kind: str, rows: list[tuple[str, str, str]]) -> str:
     )
 
 
-def build_info_panel() -> str:
+def fig_wifi_signal(df: pd.DataFrame) -> dict | None:
+    if df.empty or "rssi" not in df.columns or not df["rssi"].notna().any():
+        return None
+    y = [None if pd.isna(v) else float(v) for v in df["rssi"].tolist()]
+    trace = {
+        "type": "scatter",
+        "mode": "lines+markers",
+        "x": _ts_to_list(df.index),
+        "y": y,
+        "name": "WLAN RSSI",
+        "line": {"color": "#2563eb", "width": 2.0},
+        "marker": {"size": 6},
+        "hovertemplate": "%{y:.0f} dBm<extra>WLAN</extra>",
+    }
+    layout = _timeseries_layout("WLAN-Signalstaerke", "RSSI (dBm)", height=360)
+    layout["yaxis"] = {
+        "title": "RSSI (dBm)",
+        "zeroline": False,
+        "range": [-95, -35],
+    }
+    layout["shapes"] = [
+        {"type": "rect", "xref": "paper", "x0": 0, "x1": 1, "yref": "y", "y0": -95, "y1": -80,
+         "fillcolor": "rgba(214,39,40,0.08)", "line": {"width": 0}, "layer": "below"},
+        {"type": "rect", "xref": "paper", "x0": 0, "x1": 1, "yref": "y", "y0": -80, "y1": -70,
+         "fillcolor": "rgba(255,127,14,0.08)", "line": {"width": 0}, "layer": "below"},
+        {"type": "rect", "xref": "paper", "x0": 0, "x1": 1, "yref": "y", "y0": -70, "y1": -60,
+         "fillcolor": "rgba(255,215,0,0.08)", "line": {"width": 0}, "layer": "below"},
+        {"type": "rect", "xref": "paper", "x0": 0, "x1": 1, "yref": "y", "y0": -60, "y1": -35,
+         "fillcolor": "rgba(44,160,44,0.08)", "line": {"width": 0}, "layer": "below"},
+    ]
+    return {"data": [trace], "layout": layout}
+
+
+def build_info_panel(plots_out: dict) -> str:
     dev = _load_device_info()
     stats = _db_stats()
     enums = _load_enums_by_kind()
@@ -2670,6 +2949,7 @@ def build_info_panel() -> str:
         ver = raw.get("versions", {})
         gps = _gps_info(raw)
         cellular = _cellular_info(raw)
+        modem = _modem_info(raw)
 
         cards.append(_info_table("Geraet", [
             ("Name",          dev.get("device_name") or gen.get("device_name")),
@@ -2732,11 +3012,24 @@ def build_info_panel() -> str:
             ("ICCID",         cellular.get("iccid")),
         ]))
 
+        cards.append(_info_table("Modem-Modul", [
+            ("Modell",        modem.get("model")),
+            ("Hersteller",    modem.get("manufacturer")),
+            ("Firmware",      modem.get("firmware")),
+            ("Hardware",      modem.get("hardware")),
+            ("IMEI",          modem.get("imei")),
+            ("ICCID",         modem.get("iccid")),
+        ]))
+
         gps_rows: list[tuple[str, str]] = []
         if gps:
             gps_rows.append(("Koordinaten", f'{gps["lat"]:.6f}, {gps["lon"]:.6f}'))
             maps_url = f'https://www.openstreetmap.org/?mlat={gps["lat"]:.6f}&mlon={gps["lon"]:.6f}#map=16/{gps["lat"]:.6f}/{gps["lon"]:.6f}'
             gps_rows.append(("Karte", f'<a href="{maps_url}" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'))
+            bbox = f'{gps["lon"] - 0.01:.6f}%2C{gps["lat"] - 0.006:.6f}%2C{gps["lon"] + 0.01:.6f}%2C{gps["lat"] + 0.006:.6f}'
+            marker = f'{gps["lat"]:.6f}%2C{gps["lon"]:.6f}'
+            iframe_url = f'https://www.openstreetmap.org/export/embed.html?bbox={bbox}&layer=mapnik&marker={marker}'
+            gps_rows.append(("Kartenausschnitt", f'<iframe class="gps-map" src="{iframe_url}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="GPS Position"></iframe>'))
             if gps.get("fix") not in (None, ""):
                 gps_rows.append(("Fix", str(gps["fix"])))
             if gps.get("accuracy") not in (None, ""):
@@ -2754,6 +3047,8 @@ def build_info_panel() -> str:
             "ma": "Master (Leistungselektronik)",
             "to": "Top (Taster/LEDs)",
             "st": "Stecker/Adapter",
+            "mo": "Modem-Modul",
+            "modem": "Modem-Modul",
         }
         fw_rows: list[tuple[str, str]] = []
         for mod, label in fw_module_labels.items():
@@ -2774,6 +3069,13 @@ def build_info_panel() -> str:
             'Laeuft der Logger? Einmal starten, damit <code>/info</code> abgefragt wird.</i></p>'
             '</div>'
         )
+
+    wifi_df = _load_wifi_signal_history()
+    wifi_fig = fig_wifi_signal(wifi_df)
+    wifi_plot = ""
+    if wifi_fig:
+        plots_out["plot-wifi-signal"] = wifi_fig
+        wifi_plot = _plot_div("plot-wifi-signal")
 
     # DB-Statistiken
     db_rows: list[tuple[str, str]] = []
@@ -2831,6 +3133,7 @@ def build_info_panel() -> str:
         'Quelle: <code>/info</code> der NRGkick (zuletzt abgefragt siehe "Info-Stand") '
         'sowie lokale DB-Tabellen.</p>'
         '<div class="info-grid">' + "".join(cards) + '</div>'
+        + wifi_plot
         + enums_section +
         '</section>'
     )
@@ -3299,6 +3602,7 @@ SECTIONS: list[tuple[str, str]] = [
     ("dashboard", "Dashboard"),
     ("settings",  "Settings"),
     ("info",      "Info"),
+    ("raw",       "Raw-Daten"),
     ("current",   "Aktuelle Session"),
     ("analysis",  "Ladevorgang-Analyse"),
     ("events",    "Ereignisse"),
@@ -3505,13 +3809,31 @@ HTML_TEMPLATE = """<!doctype html>
   }}
   .control-form {{ display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }}
   .control-form label {{ color: var(--muted); }}
-  .control-form input {{ width: 7rem; padding: 0.42rem 0.55rem; border-radius: 6px;
-                         border: 1px solid var(--border); background: var(--bg); color: var(--fg); }}
+  .control-form input, .control-form select {{ width: 7rem; padding: 0.42rem 0.55rem; border-radius: 6px;
+                                               border: 1px solid var(--border); background: var(--bg); color: var(--fg); }}
   .control-form button {{ padding: 0.45rem 0.8rem; border-radius: 6px;
                           border: 1px solid var(--accent); background: var(--accent);
                           color: white; cursor: pointer; }}
+  .control-card.disabled {{ opacity: 0.68; }}
+  .control-form button:disabled, .control-form select:disabled {{
+    cursor: not-allowed; opacity: 0.7;
+  }}
   .control-status {{ color: var(--muted); font-size: 0.9rem; }}
   .control-frame {{ display: none; width: 0; height: 0; border: 0; }}
+  .danger-hint {{ color: #b91c1c; background: rgba(220,38,38,0.10);
+                  border: 1px solid rgba(220,38,38,0.35); border-radius: 8px;
+                  padding: 0.55rem 0.7rem; font-size: 0.88rem; }}
+
+  .raw-card {{ background: var(--card); border: 1px solid var(--border);
+               border-radius: 10px; padding: 0.8rem 1rem; }}
+  .raw-controls {{ display: flex; align-items: center; flex-wrap: wrap; gap: 0.8rem; }}
+  .raw-controls input[type="range"] {{ flex: 1; min-width: 220px; }}
+  .raw-controls select {{ padding: 0.42rem 0.55rem; border-radius: 6px;
+                          border: 1px solid var(--border); background: var(--bg); color: var(--fg); }}
+  .raw-time {{ color: var(--muted); margin: 0.7rem 0; font-family: Consolas, 'Courier New', monospace; }}
+  .raw-json {{ max-height: 65vh; overflow: auto; background: var(--bg);
+               border: 1px solid var(--border); border-radius: 8px;
+               padding: 0.8rem; font-size: 0.82rem; line-height: 1.35; }}
 
   table.events {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
   table.events th, table.events td {{
@@ -3544,6 +3866,8 @@ HTML_TEMPLATE = """<!doctype html>
     padding: 0.35rem 0; font-family: Consolas, 'Courier New', monospace; font-size: 0.88rem;
     word-break: break-word;
   }}
+  .gps-map {{ width: 100%; min-height: 220px; border: 1px solid var(--border);
+              border-radius: 8px; }}
   details summary {{ cursor: pointer; padding: 0.4rem 0; color: var(--fg); }}
   details[open] summary {{ margin-bottom: 0.4rem; }}
 
@@ -3720,6 +4044,80 @@ function submitEnergyLimitControl(form) {{
   return true;
 }}
 
+function submitPauseControl(form, event) {{
+  const status = form.querySelector('.control-status');
+  const button = event && event.submitter ? event.submitter : null;
+  const value = button ? button.value : '';
+  const label = value === '1' ? 'Pause' : 'Fortsetzen';
+  if (status) status.textContent = label + ' gesendet...';
+  setTimeout(() => {{
+    if (status) status.textContent = label + ' gesendet. Bestaetigung beim naechsten Report-Refresh.';
+  }}, 1200);
+  return true;
+}}
+
+function submitPhaseControl(form) {{
+  const select = form.querySelector('select[name="phase_count"]');
+  const status = form.querySelector('.control-status');
+  if (!select || select.disabled) return false;
+  const value = Number(select.value);
+  if (![1, 3].includes(value)) {{
+    if (status) status.textContent = 'Bitte 1 oder 3 Phasen waehlen.';
+    return false;
+  }}
+  if (status) status.textContent = value + ' Phase(n) gesendet...';
+  setTimeout(() => {{
+    if (status) status.textContent = value + ' Phase(n) gesendet. Bestaetigung beim naechsten Report-Refresh.';
+  }}, 1200);
+  return true;
+}}
+
+function initRawSamples() {{
+  const samples = window.NRGKICK_RAW_SAMPLES || [];
+  const slider = document.getElementById('raw-sample-range');
+  if (!slider) return;
+  slider.max = String(Math.max(0, samples.length - 1));
+  slider.value = String(Math.max(0, samples.length - 1));
+  renderRawSample();
+}}
+
+function rawSummary(sample) {{
+  return {{
+    ts: sample.ts,
+    charging_state: sample.state,
+    error_code: sample.error,
+    warning_code: sample.warning,
+    rcd_trigger: sample.rcd,
+    relay_state: sample.relay,
+    charge_count: sample.charge_count,
+    control: sample.control,
+  }};
+}}
+
+function renderRawSample() {{
+  const samples = window.NRGKICK_RAW_SAMPLES || [];
+  const slider = document.getElementById('raw-sample-range');
+  const output = document.getElementById('raw-json-view');
+  const time = document.getElementById('raw-sample-time');
+  const view = document.getElementById('raw-view-select');
+  if (!slider || !output || !time) return;
+  if (!samples.length) {{
+    time.textContent = 'Keine Raw-Daten im Zeitraum vorhanden.';
+    output.textContent = '';
+    return;
+  }}
+  const idx = Math.max(0, Math.min(samples.length - 1, Number(slider.value) || 0));
+  const sample = samples[idx];
+  time.textContent = (idx + 1) + ' / ' + samples.length + ' · ' + sample.ts;
+  const mode = view ? view.value : 'summary';
+  let data;
+  if (mode === 'values') data = sample.values;
+  else if (mode === 'control') data = sample.control;
+  else if (mode === 'both') data = {{values: sample.values, control: sample.control}};
+  else data = rawSummary(sample);
+  output.textContent = JSON.stringify(data, null, 2);
+}}
+
 window.addEventListener('resize', () => {{
   document.querySelectorAll('.plot').forEach(el => {{
     if (el.dataset.rendered === "1" && el.offsetParent !== null) {{
@@ -3731,6 +4129,7 @@ window.addEventListener('resize', () => {{
 const initial = (location.hash || '').replace('#', '') || "{default_tab}";
 activate(initial, false);
 selectCableView();
+setTimeout(initRawSamples, 0);
 </script>
 </body></html>
 """
@@ -3744,7 +4143,60 @@ def _plot_div(plot_id: str, title: str | None = None,
             f'<div class="plot" id="{plot_id}"></div></div>')
 
 
-def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd.DataFrame]:
+def _raw_panel_html(raw_sidecar_name: str) -> str:
+    sidecar = html.escape(raw_sidecar_name, quote=True)
+    return (
+        '<section class="panel" id="panel-raw">'
+        '<h2>Raw-Daten</h2>'
+        '<p class="hint">Rohdaten werden aus einer separaten Sidecar-Datei geladen, '
+        'damit der Report selbst klein bleibt. Der Slider springt exakt ueber die geloggten Abrufzeitpunkte.</p>'
+        f'<script src="{sidecar}" defer></script>'
+        '<div class="raw-card">'
+        '<div class="raw-controls">'
+        '<label for="raw-sample-range">Zeitpunkt</label>'
+        '<input id="raw-sample-range" type="range" min="0" max="0" value="0" step="1" oninput="renderRawSample()">'
+        '<select id="raw-view-select" onchange="renderRawSample()">'
+        '<option value="summary">Zusammenfassung</option>'
+        '<option value="values">values JSON</option>'
+        '<option value="control">control JSON</option>'
+        '<option value="both">beide JSONs</option>'
+        '</select>'
+        '</div>'
+        '<div class="raw-time" id="raw-sample-time">Raw-Daten werden geladen...</div>'
+        '<pre class="raw-json" id="raw-json-view"></pre>'
+        '</div>'
+        '</section>'
+    )
+
+
+def _safe_json_loads(raw: object) -> object:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
+
+
+def _raw_sidecar_js(df: pd.DataFrame) -> str:
+    rows: list[dict] = []
+    for ts, row in df.iterrows():
+        rows.append({
+            "ts": ts.isoformat(sep=" ", timespec="seconds"),
+            "state": row.get("charging_state"),
+            "error": row.get("error_code"),
+            "warning": row.get("warning_code"),
+            "rcd": row.get("rcd_trigger"),
+            "relay": row.get("connector_state"),
+            "charge_count": row.get("charge_count"),
+            "values": _safe_json_loads(row.get("raw_values_json")),
+            "control": _safe_json_loads(row.get("raw_control_json")),
+        })
+    payload = json.dumps(rows, ensure_ascii=False, default=str)
+    return "window.NRGKICK_RAW_SAMPLES = " + payload + ";\n"
+
+
+def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str) -> tuple[str, str, dict, pd.DataFrame]:
     """Erzeugt tabs_html, sections_html, plots-dict (JSON-serialisierbar)
     und das sessions-DataFrame."""
     sess_df = display_sessions(df)
@@ -3833,7 +4285,8 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     panel_settings = _settings_panel_html(df)
     panel_analysis = build_analysis_section(df, plots)
     panel_events   = build_events_panel(df, plots)
-    panel_info     = build_info_panel()
+    panel_info     = build_info_panel(plots)
+    panel_raw      = _raw_panel_html(raw_sidecar_name)
     panel_cable    = build_cable_panel(df, plots)
 
     # Dashboard mit Grid
@@ -3881,6 +4334,11 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
             badges.append(
                 f'<span class="status-badge warn">Warnung: {lw}</span>'
             )
+        lr = str(last.get("rcd_trigger", "") or "")
+        if lr and lr not in NORMAL_RCD_CODES:
+            badges.append(
+                f'<span class="status-badge err">RCD/FI: {lr}</span>'
+            )
     badge_block = (
         '<div class="badges"><a href="#events" '
         'onclick="activate(\'events\', true); return false;">'
@@ -3913,6 +4371,7 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
         "current":   panel_current,
         "analysis":  panel_analysis,
         "events":    panel_events,
+        "raw":       panel_raw,
         "temps":     panel_temps,
         "cable":     panel_cable,
         "power":     panel_power,
@@ -3972,7 +4431,7 @@ def main(argv: list[str] | None = None) -> int:
     # Defaults aus Config auflesen, sodass argparse sie als --help zeigen kann
     _preview_cfg = _load_cfg(pre_args.config) if pre_args.config else _load_cfg()
     report_cfg = _preview_cfg.get("report", {}) or {}
-    default_range = report_cfg.get("default_range", "24h")
+    default_range = report_cfg.get("default_range", "all")
     default_tab   = report_cfg.get("default_tab",   "dashboard")
     default_open  = bool(report_cfg.get("auto_open", True))
 
@@ -4025,21 +4484,29 @@ def main(argv: list[str] | None = None) -> int:
         "7d": "letzte 7 Tage", "30d": "letzte 30 Tage", "all": "gesamt",
     }[args.range]
 
-    tabs_html, sections_html, plots, _sess = build_report(df, default_tab=args.default)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.out) if args.out else (
+        REPORT_DIR / f"report_{args.range}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    )
+    raw_sidecar_path = out_path.with_suffix(".raw.js")
+
+    tabs_html, sections_html, plots, _sess = build_report(
+        df, default_tab=args.default, raw_sidecar_name=raw_sidecar_path.name,
+    )
     html = render_html(
         title_suffix, df, tabs_html, sections_html, plots,
         default_tab=args.default, start=start, end=end,
     )
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = Path(args.out) if args.out else (
-        REPORT_DIR / f"report_{args.range}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-    )
+    raw_sidecar_path.write_text(_raw_sidecar_js(df), encoding="utf-8")
     out_path.write_text(html, encoding="utf-8")
     # Zusaetzlich immer 'latest.html' schreiben (fester Pfad)
     latest_name = (CFG.get("report") or {}).get("report_filename", "latest.html")
     if latest_name:
         (REPORT_DIR / latest_name).write_text(html, encoding="utf-8")
+        (REPORT_DIR / Path(latest_name).with_suffix(".raw.js").name).write_text(
+            _raw_sidecar_js(df), encoding="utf-8",
+        )
     print(f"Report: {out_path}  ({out_path.stat().st_size // 1024} KB, {len(df)} samples)")
 
     if open_in_browser:
