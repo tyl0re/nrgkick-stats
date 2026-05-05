@@ -2134,7 +2134,9 @@ def session_label(start: pd.Timestamp, end: pd.Timestamp, n_samples: int) -> str
     return f"{start_cmp.strftime('%a %d.%m. %H:%M')} ({dur_min:.0f} min)"
 
 
-def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
+def build_analysis_section(df: pd.DataFrame,
+                           analysis_sidecars: dict[str, dict],
+                           analysis_prefix: str) -> str:
     """Erzeugt die Ladevorgang-Analyse. Pro Session werden alle Plots und
     Tabellen erzeugt; per JS-Dropdown wird nur einer sichtbar gemacht."""
     blocks = _connect_blocks(df)
@@ -2163,6 +2165,8 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         agg_rows.append(agg)
 
         sid = f"an-{idx}"
+        sidecar_name = f"{analysis_prefix}.{sid}.js"
+        session_plots: dict[str, dict] = {}
         selected = " selected" if idx == 0 else ""
         options.append(f'<option value="{sid}"{selected}>{agg["_label"]}</option>')
 
@@ -2178,35 +2182,35 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         plot_blocks: list[str] = []
         if fig_curtemp:
             pid = f"plot-{sid}-current-temp"
-            plots_out[pid] = fig_curtemp
+            session_plots[pid] = fig_curtemp
             plot_blocks.append(_plot_div(pid))
         if fig_stack:
             pid = f"plot-{sid}-stack"
-            plots_out[pid] = fig_stack
+            session_plots[pid] = fig_stack
             plot_blocks.append(_plot_div(pid))
         if fig_prog:
             pid = f"plot-{sid}-progress"
-            plots_out[pid] = fig_prog
+            session_plots[pid] = fig_prog
             plot_blocks.append(_plot_div(pid))
         scatter_views: list[str] = []
         if fig_scatter:
             pid = f"plot-{sid}-scatter"
-            plots_out[pid] = fig_scatter
+            session_plots[pid] = fig_scatter
             scatter_views.append(f'<div class="analysis-scatter-view" id="{sid}-scatter-warmest-all">' + _plot_div(pid) + '</div>')
         if fig_socket:
             pid = f"plot-{sid}-socket"
-            plots_out[pid] = fig_socket
+            session_plots[pid] = fig_socket
             scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-socket-all">' + _plot_div(pid) + '</div>')
         for amp in amp_bins:
             fig_scatter_amp = fig_analysis_scatter_p_vs_t(sub, amp)
             fig_socket_amp = fig_analysis_socket_scatter_p_vs_t(sub, amp)
             if fig_scatter_amp:
                 pid = f"plot-{sid}-scatter-{amp}a"
-                plots_out[pid] = fig_scatter_amp
+                session_plots[pid] = fig_scatter_amp
                 scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-warmest-{amp}a">' + _plot_div(pid) + '</div>')
             if fig_socket_amp:
                 pid = f"plot-{sid}-socket-{amp}a"
-                plots_out[pid] = fig_socket_amp
+                session_plots[pid] = fig_socket_amp
                 scatter_views.append(f'<div class="analysis-scatter-view hidden" id="{sid}-scatter-socket-{amp}a">' + _plot_div(pid) + '</div>')
         if scatter_views:
             scatter_select = (
@@ -2226,8 +2230,10 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
             plot_blocks.append(scatter_select + ''.join(scatter_views))
         if fig_hist:
             pid = f"plot-{sid}-hist"
-            plots_out[pid] = fig_hist
+            session_plots[pid] = fig_hist
             plot_blocks.append(_plot_div(pid))
+
+        analysis_sidecars[sidecar_name] = session_plots
 
         # Kennzahlen pro Session als Kacheln
         kpis = []
@@ -2281,8 +2287,9 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
                              'Soll-Stroms + Temperatur im oberen Quartil).</p>')
 
         panels.append(
-            f'<div class="analysis-session{hide}" id="{sid}">'
+            f'<div class="analysis-session{hide}" id="{sid}" data-plots-src="{html.escape(sidecar_name, quote=True)}">'
             f'{head}<div class="kpis">{kpi_html_}</div>'
+            '<p class="hint analysis-load-status">Plot-Daten werden erst beim Auswaehlen dieser Session geladen.</p>'
             f'{"".join(plot_blocks)}'
             f'{events_tbl_header}{events_table_html(events)}'
             f'</div>'
@@ -3918,12 +3925,49 @@ const PLOTS = {plots_json};
 const PLOTLY_CONFIG = {plotly_config_json};
 
 function renderPlot(id) {{
-  const spec = PLOTS[id];
-  if (!spec) return;
   const el = document.getElementById(id);
   if (!el || el.dataset.rendered === "1") return;
+  const spec = PLOTS[id];
+  if (!spec) {{
+    const session = el.closest('.analysis-session[data-plots-src]');
+    if (session) {{
+      loadAnalysisSessionPlots(session).then(() => renderPlot(id));
+    }}
+    return;
+  }}
   Plotly.newPlot(el, spec.data, spec.layout, PLOTLY_CONFIG);
   el.dataset.rendered = "1";
+}}
+
+window.registerAnalysisPlots = function(plots) {{
+  Object.assign(PLOTS, plots || {{}});
+}};
+
+function loadAnalysisSessionPlots(session) {{
+  if (!session) return Promise.resolve();
+  if (session.dataset.plotsLoaded === '1') return Promise.resolve();
+  if (session.dataset.plotsLoading === '1') return session._plotsPromise || Promise.resolve();
+  const src = session.dataset.plotsSrc;
+  if (!src) return Promise.resolve();
+  session.dataset.plotsLoading = '1';
+  const p = new Promise((resolve) => {{
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => {{
+      session.dataset.plotsLoaded = '1';
+      session.dataset.plotsLoading = '0';
+      resolve();
+    }};
+    script.onerror = () => {{
+      session.dataset.plotsLoading = '0';
+      const msg = session.querySelector('.analysis-load-status');
+      if (msg) msg.textContent = 'Analyse-Daten konnten nicht geladen werden: ' + src;
+      resolve();
+    }};
+    document.head.appendChild(script);
+  }});
+  session._plotsPromise = p;
+  return p;
 }}
 
 function activate(id, push) {{
@@ -3936,7 +3980,14 @@ function activate(id, push) {{
   // Plots erst rendern, wenn Panel sichtbar wird (Resize korrekt)
   const panel = document.getElementById('panel-' + id);
   if (panel) {{
+    if (id === 'analysis') {{
+      const sel = document.getElementById('analysis-select');
+      selectAnalysisSession(sel ? sel.value : 'an-0');
+      if (push) history.replaceState(null, '', '#' + id);
+      return;
+    }}
     panel.querySelectorAll('.plot').forEach(el => {{
+      if (el.offsetParent === null) return;
       renderPlot(el.id);
       // nach kurzem Delay ggf. Resize antriggern
       requestAnimationFrame(() => Plotly.Plots.resize(el));
@@ -3957,9 +4008,12 @@ function selectAnalysisSession(id) {{
   // Plots in dieser Session rendern / resizen
   const sec = document.getElementById(id);
   if (sec) {{
-    sec.querySelectorAll('.plot').forEach(el => {{
-      renderPlot(el.id);
-      requestAnimationFrame(() => Plotly.Plots.resize(el));
+    loadAnalysisSessionPlots(sec).then(() => {{
+      sec.querySelectorAll('.plot').forEach(el => {{
+        if (el.offsetParent === null) return;
+        renderPlot(el.id);
+        requestAnimationFrame(() => Plotly.Plots.resize(el));
+      }});
     }});
   }}
   selectAnalysisScatter(id);
@@ -3979,9 +4033,13 @@ function selectAnalysisScatter(id) {{
 
   const sec = document.getElementById(targetId);
   if (sec) {{
-    sec.querySelectorAll('.plot').forEach(el => {{
-      renderPlot(el.id);
-      requestAnimationFrame(() => Plotly.Plots.resize(el));
+    const session = document.getElementById(id);
+    loadAnalysisSessionPlots(session).then(() => {{
+      sec.querySelectorAll('.plot').forEach(el => {{
+        if (el.offsetParent === null) return;
+        renderPlot(el.id);
+        requestAnimationFrame(() => Plotly.Plots.resize(el));
+      }});
     }});
   }}
 }}
@@ -4196,7 +4254,13 @@ def _raw_sidecar_js(df: pd.DataFrame) -> str:
     return "window.NRGKICK_RAW_SAMPLES = " + payload + ";\n"
 
 
-def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str) -> tuple[str, str, dict, pd.DataFrame]:
+def _analysis_sidecar_js(plots: dict[str, dict]) -> str:
+    payload = json.dumps(plots, ensure_ascii=False, default=str)
+    return "window.registerAnalysisPlots && window.registerAnalysisPlots(" + payload + ");\n"
+
+
+def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str,
+                 analysis_prefix: str) -> tuple[str, str, dict, pd.DataFrame, dict[str, dict]]:
     """Erzeugt tabs_html, sections_html, plots-dict (JSON-serialisierbar)
     und das sessions-DataFrame."""
     sess_df = display_sessions(df)
@@ -4204,6 +4268,7 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str) -> t
 
     # alle Plots vorausbauen (werden per JS gerendert, Panels sind schon im DOM)
     plots: dict[str, dict] = {}
+    analysis_sidecars: dict[str, dict] = {}
     temps_fig     = fig_temperatures(df)
     temps_all_fig = fig_temperatures_all(df)
     power_fig     = fig_power_current(df)
@@ -4283,7 +4348,7 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str) -> t
 
     panel_current = current_session_html(current_df, plots, start_from_counter=start_from_counter)
     panel_settings = _settings_panel_html(df)
-    panel_analysis = build_analysis_section(df, plots)
+    panel_analysis = build_analysis_section(df, analysis_sidecars, analysis_prefix)
     panel_events   = build_events_panel(df, plots)
     panel_info     = build_info_panel(plots)
     panel_raw      = _raw_panel_html(raw_sidecar_name)
@@ -4386,7 +4451,7 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str) -> t
         for sid, _ in SECTIONS
     )
 
-    return tabs_html, sections_html, plots, sess_df
+    return tabs_html, sections_html, plots, sess_df, analysis_sidecars
 
 
 def render_html(title: str, df: pd.DataFrame, tabs_html: str, sections_html: str,
@@ -4489,9 +4554,11 @@ def main(argv: list[str] | None = None) -> int:
         REPORT_DIR / f"report_{args.range}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     )
     raw_sidecar_path = out_path.with_suffix(".raw.js")
+    analysis_prefix = out_path.with_suffix("").name + ".analysis"
 
-    tabs_html, sections_html, plots, _sess = build_report(
+    tabs_html, sections_html, plots, _sess, analysis_sidecars = build_report(
         df, default_tab=args.default, raw_sidecar_name=raw_sidecar_path.name,
+        analysis_prefix=analysis_prefix,
     )
     html = render_html(
         title_suffix, df, tabs_html, sections_html, plots,
@@ -4499,14 +4566,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     raw_sidecar_path.write_text(_raw_sidecar_js(df), encoding="utf-8")
+    for sidecar_name, sidecar_plots in analysis_sidecars.items():
+        (out_path.parent / sidecar_name).write_text(_analysis_sidecar_js(sidecar_plots), encoding="utf-8")
     out_path.write_text(html, encoding="utf-8")
     # Zusaetzlich immer 'latest.html' schreiben (fester Pfad)
     latest_name = (CFG.get("report") or {}).get("report_filename", "latest.html")
     if latest_name:
-        (REPORT_DIR / latest_name).write_text(html, encoding="utf-8")
-        (REPORT_DIR / Path(latest_name).with_suffix(".raw.js").name).write_text(
+        latest_path = REPORT_DIR / latest_name
+        latest_raw_name = Path(latest_name).with_suffix(".raw.js").name
+        latest_analysis_prefix = Path(latest_name).with_suffix("").name + ".analysis"
+        latest_html = html.replace(raw_sidecar_path.name, latest_raw_name).replace(analysis_prefix, latest_analysis_prefix)
+        latest_path.write_text(latest_html, encoding="utf-8")
+        (REPORT_DIR / latest_raw_name).write_text(
             _raw_sidecar_js(df), encoding="utf-8",
         )
+        for sidecar_name, sidecar_plots in analysis_sidecars.items():
+            latest_sidecar = sidecar_name.replace(analysis_prefix, latest_analysis_prefix, 1)
+            (REPORT_DIR / latest_sidecar).write_text(_analysis_sidecar_js(sidecar_plots), encoding="utf-8")
     print(f"Report: {out_path}  ({out_path.stat().st_size // 1024} KB, {len(df)} samples)")
 
     if open_in_browser:

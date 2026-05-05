@@ -211,7 +211,10 @@ Oder bequem per **Doppelklick** auf eine der `*.bat`-Dateien.
 Reports landen in `%LOCALAPPDATA%\NRGkickLogger\reports\` als einzelne
 HTML-Dateien (mit Zeitstempel) plus stets eine `latest.html`. Fuer den
 Raw-Daten-Tab wird daneben eine gleichnamige `.raw.js`-Sidecar-Datei erzeugt,
-z. B. `report_all_20260505_215637.raw.js` und `latest.raw.js`.
+z. B. `report_all_20260505_215637.raw.js` und `latest.raw.js`. Die schweren
+Plot-Daten der Ladevorgang-Analyse werden ebenfalls als per-Session-Sidecars
+ausgelagert (`*.analysis.an-0.js`, `*.analysis.an-1.js`, ...), damit der Report
+schneller startet und die Detailplots erst beim Auswaehlen einer Session laden.
 
 Per Doppelklick auf `stats.bat` wird der Default-Report ebenfalls erzeugt;
 die Batch-Datei legt bei Bedarf auch automatisch die `.venv` an und
@@ -224,7 +227,7 @@ installiert die Abhaengigkeiten.
 - **Info** — Gerätedaten, Adapter, Netzwerk, WLAN-Signalverlauf, optional GPS-Karte/Modem-Modul, Firmware, DB-Statistiken, Code-Nachschlagewerk
 - **Raw-Daten** — Roh-JSON pro Abrufzeitpunkt per Slider aus separater `.raw.js`-Datei
 - **Aktuelle Session** — Live-Fortschritt seit letztem Einstecken (KPIs, Status-Band, Energie/Leistung/Strom, Energy-Limit-Balken)
-- **Ladevorgang-Analyse** — Pro Session: max. Strom + waermste Temperatur, Leistung/Temperatur/Strom, Derating-Events, Scatter, Histogramm
+- **Ladevorgang-Analyse** — Pro Session: max. Strom + waermste Temperatur, Leistung/Temperatur/Strom, Derating-Events, Scatter, Histogramm; Plot-Daten werden erst beim Auswaehlen der Session nachgeladen
 - **Ereignisse** — Error-/Warning-Codes sowie RCD/FI-Status mit Klartext, Historie und Timeline
 - **Temperaturen** — alle 6 Sensoren mit gruppierter Legende, Ampel-Kacheln
 - **Kabel-Analyse** — Strom vs. Temperatur mit Trendlinie + Empfehlungstext
@@ -261,6 +264,17 @@ Sicherheitsgruenden keine lokale SQLite-Datei lesen koennen. Stattdessen erzeugt
 das Stats-Tool eine `.raw.js`-Sidecar-Datei. Der Slider bewegt sich exakt ueber
 die geloggten Poll-Zeitpunkte und zeigt wahlweise Zusammenfassung,
 `values`-JSON, `control`-JSON oder beide JSONs.
+
+### Lazy Loading
+
+Um grosse `all`-Reports schneller zu laden, werden nicht alle Daten direkt in
+das HTML geschrieben. Der Report verwendet aktuell zwei Arten von Sidecars:
+
+- `*.raw.js` fuer den Raw-Daten-Tab
+- `*.analysis.an-<n>.js` fuer die Plot-Daten einzelner Ladevorgaenge
+
+Beim Weitergeben oder Archivieren eines Reports muessen diese Sidecar-Dateien
+im selben Ordner wie die HTML-Datei bleiben.
 
 ## Datenbank-Schema
 
