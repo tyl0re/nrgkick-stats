@@ -19,6 +19,7 @@ Aufrufe:
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import sqlite3
@@ -804,6 +805,20 @@ def _augment_connect_time_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _session_reset_breaks(df: pd.DataFrame) -> pd.Series:
+    """True at rows where Wallbox session counters clearly restarted."""
+    breaks = pd.Series(False, index=df.index)
+    if "vehicle_connect_time" in df.columns:
+        ct = pd.to_numeric(df["vehicle_connect_time"], errors="coerce")
+        breaks |= ct.diff() < -60
+    if "energy_session_wh" in df.columns:
+        es = pd.to_numeric(df["energy_session_wh"], errors="coerce")
+        breaks |= es.diff() < -50
+    if not breaks.empty:
+        breaks.iloc[0] = False
+    return breaks.fillna(False)
+
+
 def find_current_session(df: pd.DataFrame) -> tuple[pd.DataFrame, bool | None]:
     """Liefert den DataFrame-Ausschnitt seit dem letzten 'Einstecken'.
 
@@ -842,8 +857,12 @@ def find_current_session(df: pd.DataFrame) -> tuple[pd.DataFrame, bool | None]:
     if not bool(connected.iloc[-1]):
         return pd.DataFrame(), None
 
-    # Bloecke mit connected=True finden, den letzten nehmen
-    block_id = (connected != connected.shift(fill_value=False)).cumsum()
+    # Bloecke mit connected=True finden, den letzten nehmen. Ein Reset der
+    # Wallbox-Zaehler trennt ebenfalls, falls der Logger keinen STANDBY-Punkt
+    # zwischen Abbruch/Neustart erwischt hat.
+    reset_break = connected & _session_reset_breaks(df)
+    block_start = (connected != connected.shift(fill_value=False)) | reset_break
+    block_id = block_start.cumsum()
     last_block = block_id.iloc[-1]
 
     mask = (block_id == last_block) & connected
@@ -1231,6 +1250,78 @@ def _energy_limit_progress_html(sess_df: pd.DataFrame) -> str:
     )
 
 
+def _settings_panel_html(df: pd.DataFrame) -> str:
+    host = _cfg_get("connection.host", "")
+    scheme = "https" if _cfg_get("connection.use_https", False) else "http"
+    action = html.escape(f"{scheme}://{host}/control", quote=True)
+
+    current_a = None
+    if "set_current_a" in df.columns and df["set_current_a"].notna().any():
+        set_a = pd.to_numeric(df["set_current_a"], errors="coerce").dropna()
+        if not set_a.empty:
+            current_a = float(set_a.iloc[-1])
+
+    energy_limit_kwh = None
+    if "energy_limit_wh" in df.columns and df["energy_limit_wh"].notna().any():
+        limit_wh = pd.to_numeric(df["energy_limit_wh"], errors="coerce").dropna()
+        if not limit_wh.empty:
+            energy_limit_kwh = float(limit_wh.iloc[-1]) / 1000.0
+
+    current_value = f' value="{current_a:.1f}"' if current_a is not None else ""
+    limit_value = f' value="{energy_limit_kwh:.1f}"' if energy_limit_kwh is not None else ' value="0.0"'
+    current_hint = f"Aktuell laut letztem Report: {current_a:.1f} A" if current_a is not None else "Aktueller Ladestrom unbekannt"
+    limit_hint = (
+        f"Aktuelles Energy-Limit: {energy_limit_kwh:.1f} kWh"
+        if energy_limit_kwh is not None and energy_limit_kwh > 0
+        else "Aktuelles Energy-Limit: aus"
+    )
+
+    if not host:
+        body = '<p><i>Keine Wallbox-IP in <code>connection.host</code> konfiguriert.</i></p>'
+    else:
+        body = (
+            '<div class="settings-grid">'
+            '<div class="control-card">'
+            '<div class="control-head"><b>Ladestrom setzen</b>'
+            f'<span>{html.escape(current_hint)}</span></div>'
+            '<form class="control-form" method="get" target="nrgkick-control-frame" '
+            f'action="{action}" onsubmit="return submitAmpControl(this)">'
+            '<label for="current-set-a">Ampere</label>'
+            f'<input id="current-set-a" name="current_set" type="number" min="6" max="16" step="0.1"{current_value} required>'
+            '<button type="submit">Senden</button>'
+            '<span class="control-status" aria-live="polite"></span>'
+            '</form>'
+            '<p class="hint">Sendet <code>/control?current_set=...</code>. '
+            'Schritte: 0.1 A, Bereich: 6 bis 16 A.</p>'
+            '</div>'
+            '<div class="control-card">'
+            '<div class="control-head"><b>Lademenge-Limit setzen</b>'
+            f'<span>{html.escape(limit_hint)}</span></div>'
+            '<form class="control-form" method="get" target="nrgkick-control-frame" '
+            f'action="{action}" onsubmit="return submitEnergyLimitControl(this)">'
+            '<label for="energy-limit-kwh">kWh</label>'
+            f'<input id="energy-limit-kwh" data-energy-limit-kwh type="number" min="0" max="200" step="0.1"{limit_value} required>'
+            '<input type="hidden" name="energy_limit" value="0">'
+            '<button type="submit">Senden</button>'
+            '<span class="control-status" aria-live="polite"></span>'
+            '</form>'
+            '<p class="hint"><code>0</code> schaltet das Limit aus. Die Anzeige ist kWh; '
+            'gesendet wird an die API als Wh: <code>/control?energy_limit=...</code>.</p>'
+            '</div>'
+            '</div>'
+            '<iframe name="nrgkick-control-frame" class="control-frame" title="NRGkick Control"></iframe>'
+        )
+
+    return (
+        '<section class="panel" id="panel-settings">'
+        '<h2>Settings</h2>'
+        '<p class="hint">Steuerbefehle werden direkt an die Wallbox gesendet. '
+        'Der bestaetigte Wert erscheint nach dem naechsten Logger-Poll bzw. Report-Refresh.</p>'
+        f'{body}'
+        '</section>'
+    )
+
+
 def current_session_html(sess_df: pd.DataFrame,
                          plots_out: dict,
                          start_from_counter: bool | None = None) -> str:
@@ -1262,7 +1353,6 @@ def current_session_html(sess_df: pd.DataFrame,
         kpi_block = (
             '<div class="kpis">'
             '<div class="kpi"><div class="v">-</div><div class="l">Kosten geschaetzt</div></div>'
-            '<div class="kpi"><div class="v">-</div><div class="l">CO2 geschaetzt</div></div>'
             '</div>'
         )
     limit_block = _energy_limit_progress_html(sess_df)
@@ -1335,8 +1425,11 @@ def _connect_blocks(df: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp, 
     if not connected.any():
         return []
 
-    # zusammenhaengende True-Laeufe sammeln
-    block_id = (connected != connected.shift(fill_value=False)).cumsum()
+    # zusammenhaengende True-Laeufe sammeln. Zusaetzlich trennen wir bei klaren
+    # Zaehler-Resets, weil der Logger den STANDBY-Zwischenpunkt verpassen kann.
+    reset_break = connected & _session_reset_breaks(df)
+    block_start = (connected != connected.shift(fill_value=False)) | reset_break
+    block_id = block_start.cumsum()
     results: list[tuple[pd.Timestamp, pd.Timestamp, pd.DataFrame]] = []
     for bid, is_conn_vals in zip(block_id.unique(),
                                  [connected[block_id == b].iloc[0] for b in block_id.unique()]):
@@ -1519,6 +1612,71 @@ def session_aggregates(sess: pd.DataFrame, events: pd.DataFrame) -> dict:
 
 
 # ---- Plots Ladevorgang-Analyse -------------------------------------------
+
+def fig_analysis_current_temp(sess: pd.DataFrame) -> dict | None:
+    """Kombiniert max. Phasenstrom und waermste Temperatur ueber die Zeit."""
+    if sess.empty:
+        return None
+
+    x = _ts_to_list(sess.index)
+    traces: list[dict] = []
+
+    current_cols = [c for c in ["current_l1_a", "current_l2_a", "current_l3_a"]
+                    if c in sess.columns and sess[c].notna().any()]
+    if current_cols:
+        max_current = sess[current_cols].apply(pd.to_numeric, errors="coerce").max(axis=1)
+        traces.append({
+            "type": "scatter", "mode": "lines",
+            "x": x,
+            "y": [None if pd.isna(v) else float(v) for v in max_current.tolist()],
+            "name": "max. Ist-Strom",
+            "line": {"color": "#1f77b4", "width": 2.0},
+            "hovertemplate": "%{y:.2f} A<extra>max. Ist-Strom</extra>",
+            "yaxis": "y",
+        })
+
+    if "set_current_a" in sess.columns and sess["set_current_a"].notna().any():
+        traces.append({
+            "type": "scatter", "mode": "lines",
+            "x": x,
+            "y": _col(sess, "set_current_a"),
+            "name": "I soll",
+            "line": {"color": "#7f7f7f", "width": 1.4, "dash": "dash"},
+            "hovertemplate": "%{y:.1f} A<extra>I soll</extra>",
+            "yaxis": "y",
+        })
+
+    temp_cols = [c for c in [
+        "temp_domestic_plug_1", "temp_domestic_plug_2", "temp_domestic_plug",
+        "temp_connector_l1", "temp_connector_l2", "temp_connector_l3", "temp_housing",
+    ] if c in sess.columns and sess[c].notna().any()]
+    if temp_cols:
+        max_temp = sess[temp_cols].apply(pd.to_numeric, errors="coerce").max(axis=1)
+        traces.append({
+            "type": "scatter", "mode": "lines",
+            "x": x,
+            "y": [None if pd.isna(v) else float(v) for v in max_temp.tolist()],
+            "name": "waermste Temperatur",
+            "line": {"color": "#d62728", "width": 2.0},
+            "hovertemplate": "%{y:.1f} °C<extra>waermste Temperatur</extra>",
+            "yaxis": "y2",
+        })
+
+    if len(traces) < 2:
+        return None
+
+    layout = _timeseries_layout("Max. Strom und Temperatur", "Strom (A)", height=460)
+    layout["yaxis"] = {"title": "Strom (A)", "zeroline": False}
+    layout["yaxis2"] = {
+        "title": "Temperatur (°C)",
+        "overlaying": "y",
+        "side": "right",
+        "zeroline": False,
+        "showgrid": False,
+    }
+    layout["legend"] = {"orientation": "h", "y": -0.2}
+    return {"data": traces, "layout": layout}
+
 
 def fig_analysis_stacked(sess: pd.DataFrame, events: pd.DataFrame) -> dict | None:
     """3-Subplot-Figur: Leistung + Steckertemperaturen + Soll-Strom.
@@ -1890,6 +2048,7 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         options.append(f'<option value="{sid}"{selected}>{agg["_label"]}</option>')
 
         # Plots registrieren (eigene IDs je Session)
+        fig_curtemp = fig_analysis_current_temp(sub)
         fig_stack   = fig_analysis_stacked(sub, events)
         fig_prog    = fig_analysis_progress(sub)
         fig_scatter = fig_analysis_scatter_p_vs_t(sub)
@@ -1898,6 +2057,10 @@ def build_analysis_section(df: pd.DataFrame, plots_out: dict) -> str:
         amp_bins = sorted(int(v) for v in pd.to_numeric(sub.get("set_current_a"), errors="coerce").dropna().round().astype(int).unique().tolist()) if "set_current_a" in sub.columns and sub["set_current_a"].notna().any() else []
 
         plot_blocks: list[str] = []
+        if fig_curtemp:
+            pid = f"plot-{sid}-current-temp"
+            plots_out[pid] = fig_curtemp
+            plot_blocks.append(_plot_div(pid))
         if fig_stack:
             pid = f"plot-{sid}-stack"
             plots_out[pid] = fig_stack
@@ -3134,6 +3297,7 @@ def build_cable_panel(df: pd.DataFrame, plots_out: dict) -> str:
 
 SECTIONS: list[tuple[str, str]] = [
     ("dashboard", "Dashboard"),
+    ("settings",  "Settings"),
     ("info",      "Info"),
     ("current",   "Aktuelle Session"),
     ("analysis",  "Ladevorgang-Analyse"),
@@ -3327,6 +3491,28 @@ HTML_TEMPLATE = """<!doctype html>
                    border: 1px solid var(--border); }}
   .limit-bar-fg {{ height: 100%; transition: width 0.3s ease; }}
 
+  .control-card {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 0.8rem 1rem;
+    margin: 0 0 1.4rem;
+  }}
+  .control-head {{ display: flex; justify-content: space-between;
+                   flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.7rem; }}
+  .control-head span {{ color: var(--muted); }}
+  .settings-grid {{ display: grid; gap: 1rem; grid-template-columns: 1fr; }}
+  @media (min-width: 900px) {{
+    .settings-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+  }}
+  .control-form {{ display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }}
+  .control-form label {{ color: var(--muted); }}
+  .control-form input {{ width: 7rem; padding: 0.42rem 0.55rem; border-radius: 6px;
+                         border: 1px solid var(--border); background: var(--bg); color: var(--fg); }}
+  .control-form button {{ padding: 0.45rem 0.8rem; border-radius: 6px;
+                          border: 1px solid var(--accent); background: var(--accent);
+                          color: white; cursor: pointer; }}
+  .control-status {{ color: var(--muted); font-size: 0.9rem; }}
+  .control-frame {{ display: none; width: 0; height: 0; border: 0; }}
+
   table.events {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
   table.events th, table.events td {{
     padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left;
@@ -3498,6 +3684,42 @@ function selectCableView() {{
   }}
 }}
 
+function submitAmpControl(form) {{
+  const input = form.querySelector('input[name="current_set"]');
+  const status = form.querySelector('.control-status');
+  if (!input) return true;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value < 6 || value > 16) {{
+    if (status) status.textContent = 'Bitte 6 bis 16 A eingeben.';
+    return false;
+  }}
+  if (status) status.textContent = value.toFixed(1) + ' A gesendet...';
+  setTimeout(() => {{
+    if (status) status.textContent = value.toFixed(1) + ' A gesendet. Bestaetigung beim naechsten Report-Refresh.';
+  }}, 1200);
+  return true;
+}}
+
+function submitEnergyLimitControl(form) {{
+  const input = form.querySelector('[data-energy-limit-kwh]');
+  const hidden = form.querySelector('input[name="energy_limit"]');
+  const status = form.querySelector('.control-status');
+  if (!input || !hidden) return true;
+  const kwh = Number(input.value);
+  if (!Number.isFinite(kwh) || kwh < 0 || kwh > 200) {{
+    if (status) status.textContent = 'Bitte 0 bis 200 kWh eingeben.';
+    return false;
+  }}
+  const wh = Math.round(kwh * 1000);
+  hidden.value = String(wh);
+  const label = kwh === 0 ? 'Limit aus' : kwh.toFixed(1) + ' kWh';
+  if (status) status.textContent = label + ' gesendet...';
+  setTimeout(() => {{
+    if (status) status.textContent = label + ' gesendet. Bestaetigung beim naechsten Report-Refresh.';
+  }}, 1200);
+  return true;
+}}
+
 window.addEventListener('resize', () => {{
   document.querySelectorAll('.plot').forEach(el => {{
     if (el.dataset.rendered === "1" && el.offsetParent !== null) {{
@@ -3608,6 +3830,7 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     )
 
     panel_current = current_session_html(current_df, plots, start_from_counter=start_from_counter)
+    panel_settings = _settings_panel_html(df)
     panel_analysis = build_analysis_section(df, plots)
     panel_events   = build_events_panel(df, plots)
     panel_info     = build_info_panel()
@@ -3686,6 +3909,7 @@ def build_report(df: pd.DataFrame, default_tab: str) -> tuple[str, str, dict, pd
     # Reihenfolge der Panels
     panel_map = {
         "dashboard": panel_dashboard,
+        "settings":  panel_settings,
         "current":   panel_current,
         "analysis":  panel_analysis,
         "events":    panel_events,
