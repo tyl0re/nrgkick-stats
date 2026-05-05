@@ -2892,6 +2892,52 @@ def _modem_info(raw: dict) -> dict:
     }
 
 
+def _version_parts(value: object) -> tuple[int, ...]:
+    if value in (None, ""):
+        return ()
+    parts: list[int] = []
+    for token in str(value).replace("-", ".").split("."):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        if digits:
+            parts.append(int(digits))
+    return tuple(parts)
+
+
+def _firmware_update_status(raw: dict, versions: dict) -> str:
+    """Best-effort update hint from API fields, if firmware exposes them."""
+    explicit = _first_present(raw, [
+        ("firmware", "update_available"),
+        ("update", "available"),
+        ("updates", "firmware_available"),
+        ("versions", "update_available"),
+    ])
+    if isinstance(explicit, bool):
+        return "Update verfuegbar" if explicit else "kein Update gemeldet"
+    if isinstance(explicit, (int, float)):
+        return "Update verfuegbar" if explicit else "kein Update gemeldet"
+    if isinstance(explicit, str) and explicit.strip():
+        text = explicit.strip().lower()
+        if text in {"true", "yes", "available", "1"}:
+            return "Update verfuegbar"
+        if text in {"false", "no", "none", "0"}:
+            return "kein Update gemeldet"
+
+    latest_sm = _first_present(raw, [
+        ("firmware", "latest_sw_sm"),
+        ("firmware", "latest_version"),
+        ("update", "latest_sw_sm"),
+        ("update", "latest_version"),
+        ("versions", "latest_sw_sm"),
+    ])
+    current_sm = versions.get("sw_sm")
+    if latest_sm and current_sm:
+        if _version_parts(latest_sm) > _version_parts(current_sm):
+            return f"Update verfuegbar: {current_sm} -> {latest_sm}"
+        return f"aktuell laut API ({current_sm})"
+
+    return "nicht pruefbar - lokale API meldet keine aktuelle Firmware-Version"
+
+
 def _code_table_html(kind: str, rows: list[tuple[str, str, str]]) -> str:
     sev_class_map = {"ok": "sev-ok", "warn": "sev-warn", "error": "sev-error"}
     tr_rows = []
@@ -3068,6 +3114,7 @@ def build_info_panel(plots_out: dict) -> str:
                 if hw:
                     parts.append(f"HW {hw}")
                 fw_rows.append((label, " &middot; ".join(parts)))
+        fw_rows.append(("Update-Status", _firmware_update_status(raw, ver)))
         cards.append(_info_table("Firmware & Hardware", fw_rows))
     else:
         cards.append(
