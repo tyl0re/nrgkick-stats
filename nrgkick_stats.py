@@ -2903,7 +2903,7 @@ def _version_parts(value: object) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _firmware_update_status(raw: dict, versions: dict) -> str:
+def _firmware_update_status(raw: dict, versions: dict) -> str | None:
     """Best-effort update hint from API fields, if firmware exposes them."""
     explicit = _first_present(raw, [
         ("firmware", "update_available"),
@@ -2935,7 +2935,7 @@ def _firmware_update_status(raw: dict, versions: dict) -> str:
             return f"Update verfuegbar: {current_sm} -> {latest_sm}"
         return f"aktuell laut API ({current_sm})"
 
-    return "nicht pruefbar - lokale API meldet keine aktuelle Firmware-Version"
+    return None
 
 
 def _code_table_html(kind: str, rows: list[tuple[str, str, str]]) -> str:
@@ -3114,7 +3114,9 @@ def build_info_panel(plots_out: dict) -> str:
                 if hw:
                     parts.append(f"HW {hw}")
                 fw_rows.append((label, " &middot; ".join(parts)))
-        fw_rows.append(("Update-Status", _firmware_update_status(raw, ver)))
+        update_status = _firmware_update_status(raw, ver)
+        if update_status:
+            fw_rows.append(("Update-Status", update_status))
         cards.append(_info_table("Firmware & Hardware", fw_rows))
     else:
         cards.append(
