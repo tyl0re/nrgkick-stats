@@ -81,9 +81,8 @@ Wallbox, Fahrzeug, Stromversorgung und lokale Umgebung selbst pruefen.
   alle 6 Minuten (konfigurierbar). Schreibt in SQLite-Tabellen
   `samples`, `samples_kv`, `device_info`, `code_enums`.
 - **`nrgkick_stats.py`** — erzeugt einen **interaktiven HTML-Report** mit
-  allen Plots (Plotly) und 11 Tabs: Dashboard, Info, Aktuelle Session,
-  Ladevorgang-Analyse, Ereignisse, Temperaturen, Kabel-Analyse, Leistung,
-  Energie/Tag, Ladesitzungen, Ladeaktivität.
+  allen Plots (Plotly), Diagnose-Ansichten, Raw-Daten-Browser und optionalen
+  Steuerfunktionen fuer die lokale NRGkick-API.
 - **`nrgkick_config.py`** — zentrale Konfiguration (alle Defaults + Laden
   aus `config.json`, Deep-Merge, Pfad-Templates).
 - **`service.ps1`** — Control-Script für den Windows-Dienst (NSSM-basiert).
@@ -210,7 +209,9 @@ Oder bequem per **Doppelklick** auf eine der `*.bat`-Dateien.
 ```
 
 Reports landen in `%LOCALAPPDATA%\NRGkickLogger\reports\` als einzelne
-HTML-Dateien (mit Zeitstempel) plus stets eine `latest.html`.
+HTML-Dateien (mit Zeitstempel) plus stets eine `latest.html`. Fuer den
+Raw-Daten-Tab wird daneben eine gleichnamige `.raw.js`-Sidecar-Datei erzeugt,
+z. B. `report_all_20260505_215637.raw.js` und `latest.raw.js`.
 
 Per Doppelklick auf `stats.bat` wird der Default-Report ebenfalls erzeugt;
 die Batch-Datei legt bei Bedarf auch automatisch die `.venv` an und
@@ -219,16 +220,47 @@ installiert die Abhaengigkeiten.
 ### Tabs im Report
 
 - **Dashboard** — Übersicht + Teaser zur aktuellen Session
-- **Info** — Gerätedaten, Adapter, Netzwerk, Firmware, DB-Statistiken, Code-Nachschlagewerk
+- **Settings** — Ladestrom setzen, Energy-Limit setzen, Laden pausieren/fortsetzen, Phasenumschaltung falls in der App freigegeben
+- **Info** — Gerätedaten, Adapter, Netzwerk, WLAN-Signalverlauf, optional GPS-Karte/Modem-Modul, Firmware, DB-Statistiken, Code-Nachschlagewerk
+- **Raw-Daten** — Roh-JSON pro Abrufzeitpunkt per Slider aus separater `.raw.js`-Datei
 - **Aktuelle Session** — Live-Fortschritt seit letztem Einstecken (KPIs, Status-Band, Energie/Leistung/Strom, Energy-Limit-Balken)
-- **Ladevorgang-Analyse** — Pro Session: Leistung/Temperatur/Strom auf gemeinsamer Zeitachse, Derating-Events, Scatter, Histogramm
-- **Ereignisse** — alle Error-/Warning-Codes mit Klartext, Timeline
+- **Ladevorgang-Analyse** — Pro Session: max. Strom + waermste Temperatur, Leistung/Temperatur/Strom, Derating-Events, Scatter, Histogramm
+- **Ereignisse** — Error-/Warning-Codes sowie RCD/FI-Status mit Klartext, Historie und Timeline
 - **Temperaturen** — alle 6 Sensoren mit gruppierter Legende, Ampel-Kacheln
 - **Kabel-Analyse** — Strom vs. Temperatur mit Trendlinie + Empfehlungstext
 - **Leistung & Strom** — Wirkleistung + Strom pro Phase
 - **Energie/Tag** — kWh je Tag als Balken
 - **Ladesitzungen** — Tabelle aller erkannten Ladevorgänge
 - **Ladeaktivität** — Heatmap Tag × Stunde
+
+### Settings und Steuerbefehle
+
+Der `Settings`-Tab sendet Steuerbefehle direkt an die lokale API der Wallbox,
+z. B. `GET /control?current_set=11.5`. Unterstuetzt werden aktuell:
+
+- `current_set` — Ladestrom in Ampere, Eingabe `6` bis `16 A` in `0.1 A`-Schritten
+- `energy_limit` — Lademenge-Limit in Wh; die UI zeigt kWh, `0` schaltet das Limit aus
+- `charge_pause` — `1` pausiert, `0` setzt fort
+- `phase_count` — `1` oder `3`, nur aktiv wenn die NRGkick-App Phasenumschaltung freigegeben hat
+
+Die Phasenumschaltung ist im Report bewusst mit einer roten Warnung versehen,
+weil sie je nach Installation/Fahrzeug potentiell gefaehrlich sein kann. Der
+Report prueft beim Erzeugen per sicherem Same-Value-Request, ob die API
+`phase_count` akzeptiert; andernfalls bleibt die Auswahl ausgegraut.
+
+Wenn fuer die NRGkick-API Benutzer/Passwort gesetzt ist, kann der lokale
+HTML-Report die Credentials nicht sicher einbetten. Der Browser kann dann einen
+Basic-Auth-Dialog anzeigen oder den Request blockieren. In diesem Fall besser
+einen kleinen lokalen Proxy oder ein separates Control-Script verwenden, das die
+Credentials aus `config.json` liest.
+
+### Raw-Daten-Tab
+
+Der Raw-Daten-Tab laedt die Rohdaten nicht direkt aus SQLite, weil Browser aus
+Sicherheitsgruenden keine lokale SQLite-Datei lesen koennen. Stattdessen erzeugt
+das Stats-Tool eine `.raw.js`-Sidecar-Datei. Der Slider bewegt sich exakt ueber
+die geloggten Poll-Zeitpunkte und zeigt wahlweise Zusammenfassung,
+`values`-JSON, `control`-JSON oder beide JSONs.
 
 ## Datenbank-Schema
 
