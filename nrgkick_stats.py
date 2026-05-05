@@ -43,6 +43,15 @@ from nrgkick_config import (
 )
 
 
+# Optionaler lokaler Debug-Hook. Existiert das Modul nicht, bleibt der
+# Report unveraendert. Es darf eine Funktion `latest_module_versions()`
+# anbieten, die ein Dict liefert; sonst wird der Hook ignoriert.
+try:
+    from _dev import debugcode as _local_debug  # type: ignore
+except Exception:
+    _local_debug = None
+
+
 log = logging.getLogger(__name__)
 
 
@@ -2987,6 +2996,70 @@ def fig_wifi_signal(df: pd.DataFrame) -> dict | None:
     return {"data": [trace], "layout": layout}
 
 
+def _firmware_card(raw: dict, ver: dict) -> str:
+    """Baut die 'Firmware & Hardware'-Karte fuer den Info-Tab.
+
+    Verwendet die NRGkick-Gen2-Modulkennungen (sm, ma, to, st und Modem)
+    und delegiert ggf. an einen optionalen lokalen Hook fuer
+    Zusatzzeilen.
+    """
+    fw_module_labels = {
+        "sm": "SmartModule (Hauptsteuerung)",
+        "ma": "Master (Leistungselektronik)",
+        "to": "Top (Taster/LEDs)",
+        "st": "Stecker/Adapter",
+        "mo": "Modem-Modul",
+        "modem": "Modem-Modul",
+    }
+    fw_rows: list[tuple[str, str]] = []
+    for mod, label in fw_module_labels.items():
+        sw = ver.get(f"sw_{mod}")
+        hw = ver.get(f"hw_{mod}")
+        if sw or hw:
+            parts: list[str] = []
+            if sw:
+                parts.append(f"SW {sw}")
+            if hw:
+                parts.append(f"HW {hw}")
+            fw_rows.append((label, " &middot; ".join(parts)))
+    update_status = _firmware_update_status(raw, ver)
+    if update_status:
+        fw_rows.append(("Update-Status", update_status))
+    fw_rows.extend(_local_extra_rows(ver))
+    return _info_table("Firmware & Hardware", fw_rows)
+
+
+def _local_extra_rows(context: dict | None = None) -> list[tuple[str, str]]:
+    """Optionaler lokaler Hook (siehe Modul-Import oben).
+
+    Liefert eine Liste fertiger ``(Label, Wert)``-Zeilen, die unten an
+    die jeweilige Info-Tabelle angehaengt werden. Fehlt das Modul oder
+    liefert es nichts Brauchbares, wird eine leere Liste zurueckgegeben.
+    Fehler werden bewusst geschluckt, damit der Report immer fertig
+    gerendert wird.
+    """
+    if _local_debug is None:
+        return []
+    fn = getattr(_local_debug, "extra_rows", None)
+    if not callable(fn):
+        return []
+    try:
+        result = fn(context or {})
+    except Exception:
+        return []
+    rows: list[tuple[str, str]] = []
+    if isinstance(result, list):
+        for item in result:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], str)
+            ):
+                rows.append((item[0], item[1]))
+    return rows
+
+
 def build_info_panel(plots_out: dict) -> str:
     dev = _load_device_info()
     stats = _db_stats()
@@ -3092,32 +3165,7 @@ def build_info_panel(plots_out: dict) -> str:
                     gps_rows.append(("Genauigkeit", str(gps["accuracy"])))
         cards.append(_info_table("GPS", gps_rows))
 
-        # Firmware-Versionen (alle Microcontroller einzeln)
-        # NRGkick Gen2 hat: sm, ma, to, st - jeweils sw+hw
-        # sm = ... ma = ... to = ... st = ...
-        fw_module_labels = {
-            "sm": "SmartModule (Hauptsteuerung)",
-            "ma": "Master (Leistungselektronik)",
-            "to": "Top (Taster/LEDs)",
-            "st": "Stecker/Adapter",
-            "mo": "Modem-Modul",
-            "modem": "Modem-Modul",
-        }
-        fw_rows: list[tuple[str, str]] = []
-        for mod, label in fw_module_labels.items():
-            sw = ver.get(f"sw_{mod}")
-            hw = ver.get(f"hw_{mod}")
-            if sw or hw:
-                parts = []
-                if sw:
-                    parts.append(f"SW {sw}")
-                if hw:
-                    parts.append(f"HW {hw}")
-                fw_rows.append((label, " &middot; ".join(parts)))
-        update_status = _firmware_update_status(raw, ver)
-        if update_status:
-            fw_rows.append(("Update-Status", update_status))
-        cards.append(_info_table("Firmware & Hardware", fw_rows))
+        cards.append(_firmware_card(raw, ver))
     else:
         cards.append(
             '<div class="info-card"><h3>Geraet</h3>'

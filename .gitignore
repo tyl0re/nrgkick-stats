@@ -26,6 +26,9 @@ reports/
 *.log.*
 config.json
 config.local.json
+apk/
+*.apk
+*.apks
 
 # lokale Dev-Tools und Helfer (nicht ins Repo).
 # Alles was mit Unterstrich beginnt, plus der gesamte _dev-Ordner.
