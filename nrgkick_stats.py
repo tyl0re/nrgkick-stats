@@ -356,6 +356,43 @@ def temperature_tiles_html(df: pd.DataFrame) -> str:
 
 # Power & Current -----------------------------------------------------------
 
+def fig_currents_only(df: pd.DataFrame) -> dict | None:
+    """Reine Strom-Zeitreihe: L1/L2/L3 als drei Linien, plus I soll als
+    gestrichelte Referenzlinie. Keine Leistung, dedizierte Ampere-Achse.
+    """
+    palette = [("current_l1_a", "I L1", "#1f77b4"),
+               ("current_l2_a", "I L2", "#2ca02c"),
+               ("current_l3_a", "I L3", "#d62728")]
+    if not any(c in df.columns and df[c].notna().any() for c, _, _ in palette):
+        return None
+    x = _ts_to_list(df.index)
+    traces: list[dict] = []
+    for col, label, color in palette:
+        y = _col(df, col)
+        if y is None:
+            continue
+        traces.append({
+            "type": "scattergl",
+            "mode": "lines",
+            "x": x, "y": y,
+            "name": label,
+            "line": {"color": color, "width": 1.4},
+            "hovertemplate": "%{y:.2f} A<extra>" + label + "</extra>",
+        })
+    if "set_current_a" in df.columns and df["set_current_a"].notna().any():
+        traces.append({
+            "type": "scattergl",
+            "mode": "lines",
+            "x": x, "y": _col(df, "set_current_a"),
+            "name": "I soll",
+            "line": {"color": "#888", "width": 1.0, "dash": "dash"},
+            "hovertemplate": "%{y:.1f} A<extra>I soll</extra>",
+        })
+    layout = _timeseries_layout("Strom je Phase (A)", "Strom (A)", height=420)
+    layout["yaxis"] = {"title": "Strom (A)", "zeroline": False, "rangemode": "tozero"}
+    return {"data": traces, "layout": layout}
+
+
 def fig_power_current(df: pd.DataFrame) -> dict | None:
     if "power_w" not in df.columns or df["power_w"].notna().sum() == 0:
         return None
@@ -4369,6 +4406,7 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str,
     temps_fig     = fig_temperatures(df)
     temps_all_fig = fig_temperatures_all(df)
     power_fig     = fig_power_current(df)
+    currents_fig  = fig_currents_only(df)
     energy_fig, _daily = fig_energy_per_day(df)
     heatmap_fig   = fig_power_heatmap(df)
 
@@ -4378,6 +4416,8 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str,
         plots["plot-temps-all"] = temps_all_fig
     if power_fig:
         plots["plot-power"] = power_fig
+    if currents_fig:
+        plots["plot-currents"] = currents_fig
     if energy_fig:
         plots["plot-energy"] = energy_fig
     if heatmap_fig:
@@ -4428,8 +4468,24 @@ def build_report(df: pd.DataFrame, default_tab: str, raw_sidecar_name: str,
         f'<section class="panel" id="panel-temps">'
         f'<h2>Temperaturen</h2>{temp_body}</section>'
     )
-    panel_power = _panel_plot(
-        "power", "plot-power", "Leistung & Strom je Phase", hint_legend,
+    if "plot-power" not in plots and "plot-currents" not in plots:
+        power_body = "<p><i>Keine Daten im Zeitraum.</i></p>"
+    else:
+        power_body = hint_zoom + hint_legend
+        if "plot-power" in plots:
+            power_body += _plot_div("plot-power")
+        if "plot-currents" in plots:
+            power_body += (
+                '<h3 style="margin-top:2rem">Strom je Phase</h3>'
+                '<p class="hint">Nur Ampere, alle drei Phasen einzeln. '
+                'Gestrichelt: Soll-Strom.</p>'
+                + _plot_div("plot-currents")
+            )
+    panel_power = (
+        '<section class="panel" id="panel-power">'
+        '<h2>Leistung & Strom je Phase</h2>'
+        + power_body
+        + '</section>'
     )
     panel_energy = _panel_plot(
         "energy", "plot-energy", "Lademenge je Tag",
